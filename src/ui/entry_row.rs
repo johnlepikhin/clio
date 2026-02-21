@@ -25,8 +25,8 @@ pub fn create_factory() -> SignalListItemFactory {
 
         let preview_label = Label::new(None);
         preview_label.set_halign(Align::Start);
-        preview_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        preview_label.set_max_width_chars(80);
+        preview_label.set_wrap(true);
+        preview_label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
         preview_label.set_widget_name("preview");
         vbox.append(&preview_label);
 
@@ -66,14 +66,8 @@ pub fn create_factory() -> SignalListItemFactory {
             .unwrap();
 
         let ct = entry_obj.content_type();
-        let preview = entry_obj.preview_text();
         let display_text = if ct == "text" {
-            let first_line = preview.lines().next().unwrap_or("");
-            if first_line.len() > 120 {
-                format!("{}...", &first_line[..120])
-            } else {
-                first_line.to_string()
-            }
+            entry_obj.preview_text().to_string()
         } else if ct == "image" {
             "[Image]".to_string()
         } else {

@@ -215,4 +215,54 @@ mod tests {
             "expected 'unknown variant' in error, got: {err}"
         );
     }
+
+    #[test]
+    fn test_preview_text_chars_default() {
+        let config = Config::default();
+        assert_eq!(config.preview_text_chars, 4096);
+    }
+
+    #[test]
+    fn test_history_page_size_default() {
+        let config = Config::default();
+        assert_eq!(config.history_page_size, 50);
+    }
+
+    #[test]
+    fn test_preview_text_chars_deserialization() {
+        let yaml = "preview_text_chars: 8192\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.preview_text_chars, 8192);
+    }
+
+    #[test]
+    fn test_history_page_size_deserialization() {
+        let yaml = "history_page_size: 100\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.history_page_size, 100);
+    }
+
+    #[test]
+    fn test_validate_preview_text_chars_zero() {
+        let mut config = Config::default();
+        config.preview_text_chars = 0;
+        let errors = config.validate().unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("preview_text_chars")));
+    }
+
+    #[test]
+    fn test_validate_history_page_size_zero() {
+        let mut config = Config::default();
+        config.history_page_size = 0;
+        let errors = config.validate().unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("history_page_size")));
+    }
+
+    #[test]
+    fn test_default_yaml_has_preview_and_page_size() {
+        let yaml = Config::default_yaml();
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config.preview_text_chars, 4096);
+        assert_eq!(config.history_page_size, 50);
+    }
 }

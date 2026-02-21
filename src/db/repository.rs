@@ -39,12 +39,51 @@ pub fn update_timestamp(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn list_entries(conn: &Connection, limit: usize) -> Result<Vec<ClipboardEntry>> {
     let mut stmt = conn.prepare(
         "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata
          FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit as i64], row_to_entry)?;
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row?);
+    }
+    Ok(entries)
+}
+
+pub fn list_entries_page(
+    conn: &Connection,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<ClipboardEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata
+         FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+    )?;
+    let rows = stmt.query_map(params![limit as i64, offset as i64], row_to_entry)?;
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row?);
+    }
+    Ok(entries)
+}
+
+pub fn search_entries_page(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<ClipboardEntry>> {
+    let pattern = format!("%{query}%");
+    let mut stmt = conn.prepare(
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata
+         FROM clipboard_entries
+         WHERE text_content LIKE ?1
+         ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
+    )?;
+    let rows = stmt.query_map(params![pattern, limit as i64, offset as i64], row_to_entry)?;
     let mut entries = Vec::new();
     for row in rows {
         entries.push(row?);
@@ -231,5 +270,61 @@ mod tests {
 
         let not_found = get_entry_content(&conn, 9999).unwrap();
         assert!(not_found.is_none());
+    }
+
+    #[test]
+    fn test_list_entries_page() {
+        let conn = setup();
+        for i in 0..10 {
+            let entry = ClipboardEntry::from_text(format!("entry {i}"), None);
+            insert_entry(&conn, &entry).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // First page
+        let page1 = list_entries_page(&conn, 3, 0).unwrap();
+        assert_eq!(page1.len(), 3);
+
+        // Second page
+        let page2 = list_entries_page(&conn, 3, 3).unwrap();
+        assert_eq!(page2.len(), 3);
+
+        // Pages should not overlap
+        let ids1: Vec<_> = page1.iter().map(|e| e.id).collect();
+        let ids2: Vec<_> = page2.iter().map(|e| e.id).collect();
+        for id in &ids1 {
+            assert!(!ids2.contains(id));
+        }
+
+        // Beyond all entries
+        let empty = list_entries_page(&conn, 3, 100).unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_search_entries_page() {
+        let conn = setup();
+        for i in 0..5 {
+            let entry = ClipboardEntry::from_text(format!("apple {i}"), None);
+            insert_entry(&conn, &entry).unwrap();
+        }
+        for i in 0..3 {
+            let entry = ClipboardEntry::from_text(format!("banana {i}"), None);
+            insert_entry(&conn, &entry).unwrap();
+        }
+
+        // Search matching
+        let results = search_entries_page(&conn, "apple", 10, 0).unwrap();
+        assert_eq!(results.len(), 5);
+
+        // Search with pagination
+        let page1 = search_entries_page(&conn, "apple", 2, 0).unwrap();
+        assert_eq!(page1.len(), 2);
+        let page2 = search_entries_page(&conn, "apple", 2, 2).unwrap();
+        assert_eq!(page2.len(), 2);
+
+        // Search not matching
+        let none = search_entries_page(&conn, "cherry", 10, 0).unwrap();
+        assert!(none.is_empty());
     }
 }

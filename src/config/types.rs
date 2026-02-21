@@ -38,6 +38,8 @@ pub struct Config {
     pub window_width: i32,
     pub window_height: i32,
     pub sync_mode: SyncMode,
+    pub preview_text_chars: usize,
+    pub history_page_size: usize,
 }
 
 impl Default for Config {
@@ -50,6 +52,8 @@ impl Default for Config {
             window_width: 600,
             window_height: 400,
             sync_mode: SyncMode::default(),
+            preview_text_chars: 4096,
+            history_page_size: 50,
         }
     }
 }
@@ -80,6 +84,12 @@ window_height: 400
 # Synchronization between PRIMARY selection (mouse) and CLIPBOARD (Ctrl+C/V).
 # Values: both (default), to-clipboard, to-primary, disabled
 sync_mode: both
+
+# Maximum characters of text shown in history list preview (default 4096).
+preview_text_chars: 4096
+
+# Number of entries loaded per page in the history window (default 50).
+history_page_size: 50
 "#
         .to_owned()
     }
@@ -103,6 +113,12 @@ sync_mode: both
         }
         if self.window_height <= 0 {
             errors.push("window_height must be greater than 0".to_owned());
+        }
+        if self.preview_text_chars == 0 {
+            errors.push("preview_text_chars must be greater than 0".to_owned());
+        }
+        if self.history_page_size == 0 {
+            errors.push("history_page_size must be greater than 0".to_owned());
         }
 
         if errors.is_empty() {
