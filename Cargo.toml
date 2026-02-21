@@ -26,10 +26,12 @@ rusqlite_migration = "1"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 thiserror = "2"
+x11rb = { version = "0.13", optional = true, default-features = false }
 
 [features]
-default = ["ui"]
+default = ["ui", "x11-source-app"]
 ui = ["dep:gtk4"]
+x11-source-app = ["dep:x11rb"]
 
 [profile.release]
 lto = true
