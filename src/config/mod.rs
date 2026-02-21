@@ -1,6 +1,6 @@
 mod types;
 
-pub use types::Config;
+pub use types::{Config, SyncMode};
 
 use std::path::{Path, PathBuf};
 
@@ -154,5 +154,65 @@ mod tests {
         assert_eq!(errors.len(), 2);
         assert!(errors[0].contains("max_history"));
         assert!(errors[1].contains("window_width"));
+    }
+
+    // T008: SyncMode serde roundtrip (all four kebab-case values)
+    #[test]
+    fn test_sync_mode_serde_roundtrip() {
+        use types::SyncMode;
+        let modes = [
+            (SyncMode::ToClipboard, "to-clipboard"),
+            (SyncMode::ToPrimary, "to-primary"),
+            (SyncMode::Both, "both"),
+            (SyncMode::Disabled, "disabled"),
+        ];
+        for (mode, expected_yaml) in &modes {
+            let yaml = format!("sync_mode: {expected_yaml}\n");
+            let config: Config = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(&config.sync_mode, mode);
+
+            let serialized = serde_yaml::to_string(&config).unwrap();
+            assert!(
+                serialized.contains(expected_yaml),
+                "expected '{expected_yaml}' in serialized output: {serialized}"
+            );
+        }
+    }
+
+    // T011: SyncMode default and equality
+    #[test]
+    fn test_sync_mode_default_is_both() {
+        use types::SyncMode;
+        assert_eq!(SyncMode::default(), SyncMode::Both);
+    }
+
+    #[test]
+    fn test_config_without_sync_mode_defaults_to_both() {
+        use types::SyncMode;
+        let yaml = "max_history: 100\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.sync_mode, SyncMode::Both);
+    }
+
+    // T013: Updated default_yaml() parses and produces SyncMode::Both
+    #[test]
+    fn test_default_yaml_has_sync_mode() {
+        use types::SyncMode;
+        let yaml = Config::default_yaml();
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config.sync_mode, SyncMode::Both);
+    }
+
+    // T014: Invalid sync_mode fails to parse
+    #[test]
+    fn test_invalid_sync_mode_fails() {
+        let yaml = "sync_mode: invalid\n";
+        let result: std::result::Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown variant"),
+            "expected 'unknown variant' in error, got: {err}"
+        );
     }
 }

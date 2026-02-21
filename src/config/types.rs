@@ -1,4 +1,32 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncMode {
+    ToClipboard,
+    ToPrimary,
+    Both,
+    Disabled,
+}
+
+impl Default for SyncMode {
+    fn default() -> Self {
+        Self::Both
+    }
+}
+
+impl fmt::Display for SyncMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ToClipboard => write!(f, "to-clipboard"),
+            Self::ToPrimary => write!(f, "to-primary"),
+            Self::Both => write!(f, "both"),
+            Self::Disabled => write!(f, "disabled"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -9,6 +37,7 @@ pub struct Config {
     pub max_entry_size_kb: u64,
     pub window_width: i32,
     pub window_height: i32,
+    pub sync_mode: SyncMode,
 }
 
 impl Default for Config {
@@ -20,6 +49,7 @@ impl Default for Config {
             max_entry_size_kb: 51200,
             window_width: 600,
             window_height: 400,
+            sync_mode: SyncMode::default(),
         }
     }
 }
@@ -46,6 +76,10 @@ max_entry_size_kb: 51200
 # GTK history window dimensions.
 window_width: 600
 window_height: 400
+
+# Synchronization between PRIMARY selection (mouse) and CLIPBOARD (Ctrl+C/V).
+# Values: both (default), to-clipboard, to-primary, disabled
+sync_mode: both
 "#
         .to_owned()
     }
