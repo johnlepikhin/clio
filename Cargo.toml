@@ -1,8 +1,14 @@
 [package]
 name = "clio"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "A clipboard manager with SQLite history and GTK4 UI"
+license = "MIT"
+repository = "https://github.com/johnlepikhin/clio"
+readme = "README.md"
+keywords = ["clipboard", "history", "gtk4", "linux"]
+categories = ["command-line-utilities"]
+exclude = ["specs/", ".specify/", "manifest.scm", "CLAUDE.md"]
 
 [dependencies]
 anyhow = "1"
