@@ -10,6 +10,7 @@ Auto-generated from all feature plans. Last updated: 2026-02-21
 - Rust (edition 2021, stable toolchain) + gtk4-rs (ListView, ScrolledWindow, ListStore), rusqlite, serde, serde_yaml, clap (004-history-preview)
 - SQLite (existing, unchanged schema) (004-history-preview)
 - Rust (edition 2021, stable toolchain) + gtk4-rs 0.9 (ListView, SearchEntry, ScrolledWindow, gdk_pixbuf), rusqlite, serde, serde_yaml (005-history-ux-images)
+- N/A (no data model changes) (006-history-row-separators)
 
 - Rust (edition 2021, stable toolchain) + clap, arboard, rusqlite, gtk4-rs, serde, (001-clipboard-manager)
 
@@ -29,9 +30,9 @@ cargo test [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECH
 Rust (edition 2021, stable toolchain): Follow standard conventions
 
 ## Recent Changes
+- 006-history-row-separators: Added Rust (edition 2021, stable toolchain) + gtk4-rs 0.9
 - 005-history-ux-images: Added Rust (edition 2021, stable toolchain) + gtk4-rs 0.9 (ListView, SearchEntry, ScrolledWindow, gdk_pixbuf), rusqlite, serde, serde_yaml
 - 004-history-preview: Added Rust (edition 2021, stable toolchain) + gtk4-rs (ListView, ScrolledWindow, ListStore), rusqlite, serde, serde_yaml, clap
-- 003-clipboard-sync: Added Rust (edition 2021, stable toolchain) + arboard 3.6.1 (LinuxClipboardKind, GetExtLinux, SetExtLinux), serde, serde_yaml, clap
 
 
 <!-- MANUAL ADDITIONS START -->

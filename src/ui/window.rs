@@ -113,6 +113,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     let factory = entry_row::create_factory();
     let list_view = ListView::new(Some(selection.clone()), Some(factory));
     list_view.set_vexpand(true);
+    list_view.set_show_separators(true);
 
     // DB-side search: on search_changed, clear store and query DB
     let store_for_search = store.clone();
