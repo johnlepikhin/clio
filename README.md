@@ -4,6 +4,16 @@ A clipboard manager for Linux with SQLite history and GTK4 UI.
 
 Clio monitors your clipboard in the background, storing text and image entries in a local SQLite database. It deduplicates content, supports search and auto-expiration, and provides a GTK4 window for browsing and restoring past clipboard entries. Works on Linux with X11 and Wayland.
 
+## Features
+
+- Text and image clipboard history with SQLite storage
+- Content deduplication by hash
+- GTK4 history browser with search, thumbnails, and infinite scroll
+- Clipboard sync between PRIMARY and CLIPBOARD selections
+- Auto-expiration of old entries
+- Headless mode (no GTK4 dependency) for servers and scripts
+- Lightweight: the background watcher (`clio watch`) uses ~1.7 MB of private memory (heap + stack), ~10 MB PSS total including shared GTK4/glib libraries
+
 ## Quick Start
 
 ```bash
