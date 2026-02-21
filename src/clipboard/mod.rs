@@ -107,6 +107,27 @@ pub fn write_clipboard_text(text: &str) -> Result<()> {
     }
 }
 
+/// Write text to clipboard synchronously (blocks until clipboard is set).
+/// Use this for short-lived processes like `clio copy` that would exit
+/// before a background thread finishes.
+pub fn write_clipboard_text_sync(text: &str) -> Result<()> {
+    let mut cb = Clipboard::new().map_err(|e| AppError::Clipboard(e.to_string()))?;
+    #[cfg(target_os = "linux")]
+    {
+        cb.set()
+            .clipboard(LinuxClipboardKind::Clipboard)
+            .text(text.to_owned())
+            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cb.set()
+            .text(text.to_owned())
+            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+    }
+    Ok(())
+}
+
 pub fn write_clipboard_image(rgba: &[u8], width: u32, height: u32) -> Result<()> {
     let rgba = rgba.to_vec();
     std::thread::spawn(move || {

@@ -24,14 +24,14 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| config::data_dir().join("clio.db"));
 
     match cli.command {
-        Commands::Show => cli::show::run().map_err(Into::into),
+        Commands::Show => cli::show::run(),
         Commands::Copy => {
             let conn = db::init_db(&db_path).context("failed to initialize database")?;
-            cli::copy::run(&conn, &config).map_err(Into::into)
+            cli::copy::run(&conn, &config)
         }
         Commands::Watch => {
             let conn = db::init_db(&db_path).context("failed to initialize database")?;
-            cli::watch::run(&conn, &config).map_err(Into::into)
+            cli::watch::run(&conn, &config)
         }
         Commands::History => cli::history::run(&config, db_path).map_err(Into::into),
         Commands::Config { ref command } => {

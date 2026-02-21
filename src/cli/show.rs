@@ -1,7 +1,8 @@
-use crate::clipboard::{self, ClipboardContent};
-use crate::errors::Result;
+use anyhow::bail;
 
-pub fn run() -> Result<()> {
+use crate::clipboard::{self, ClipboardContent};
+
+pub fn run() -> anyhow::Result<()> {
     match clipboard::read_clipboard()? {
         ClipboardContent::Text(text) => {
             print!("{text}");
@@ -17,8 +18,7 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         ClipboardContent::Empty => {
-            eprintln!("error: clipboard is empty");
-            std::process::exit(1);
+            bail!("clipboard is empty");
         }
     }
 }

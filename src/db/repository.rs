@@ -1,6 +1,9 @@
+use std::time::Duration;
+
+use chrono::{Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection};
 
-use crate::errors::Result;
+use crate::errors::{AppError, Result};
 use crate::models::entry::{ClipboardEntry, ContentType};
 
 pub fn insert_entry(conn: &Connection, entry: &ClipboardEntry) -> Result<i64> {
@@ -76,11 +79,12 @@ pub fn search_entries_page(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<ClipboardEntry>> {
-    let pattern = format!("%{query}%");
+    let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let pattern = format!("%{escaped}%");
     let mut stmt = conn.prepare(
         "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata
          FROM clipboard_entries
-         WHERE text_content LIKE ?1
+         WHERE text_content LIKE ?1 ESCAPE '\\'
          ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
     )?;
     let rows = stmt.query_map(params![pattern, limit as i64, offset as i64], row_to_entry)?;
@@ -125,37 +129,53 @@ pub fn prune_oldest(conn: &Connection, max_count: usize) -> Result<u64> {
     Ok(deleted as u64)
 }
 
+pub fn prune_expired(conn: &Connection, max_age: Option<Duration>) -> Result<u64> {
+    let age = match max_age {
+        Some(a) => a,
+        None => return Ok(0),
+    };
+    let chrono_age = ChronoDuration::from_std(age)
+        .map_err(|_| crate::errors::AppError::Config("max_age duration too large".to_owned()))?;
+    let cutoff = Utc::now() - chrono_age;
+    let cutoff_str = cutoff.format("%Y-%m-%dT%H:%M:%.3f").to_string();
+    let deleted = conn.execute(
+        "DELETE FROM clipboard_entries WHERE created_at < ?1",
+        params![cutoff_str],
+    )?;
+    Ok(deleted as u64)
+}
+
 pub fn save_or_update(
     conn: &Connection,
     entry: &ClipboardEntry,
     max_history: usize,
+    max_age: Option<Duration>,
 ) -> Result<i64> {
     if let Some(existing) = find_by_hash(conn, &entry.content_hash)? {
-        let id = existing.id.expect("DB entry must have id");
+        let id = existing
+            .id
+            .ok_or(AppError::Database(rusqlite::Error::QueryReturnedNoRows))?;
         update_timestamp(conn, id)?;
         return Ok(id);
     }
     let id = insert_entry(conn, entry)?;
     prune_oldest(conn, max_history)?;
+    prune_expired(conn, max_age)?;
     Ok(id)
 }
 
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClipboardEntry> {
-    Ok(row_to_entry_unchecked(row))
-}
-
-fn row_to_entry_unchecked(row: &rusqlite::Row<'_>) -> ClipboardEntry {
-    let ct_str: String = row.get_unwrap(1);
-    ClipboardEntry {
-        id: Some(row.get_unwrap(0)),
+    let ct_str: String = row.get(1)?;
+    Ok(ClipboardEntry {
+        id: Some(row.get(0)?),
         content_type: ContentType::from_str(&ct_str),
-        text_content: row.get_unwrap(2),
-        blob_content: row.get_unwrap(3),
-        content_hash: row.get_unwrap(4),
-        source_app: row.get_unwrap(5),
-        created_at: row.get_unwrap(6),
-        metadata: row.get_unwrap(7),
-    }
+        text_content: row.get(2)?,
+        blob_content: row.get(3)?,
+        content_hash: row.get(4)?,
+        source_app: row.get(5)?,
+        created_at: row.get(6)?,
+        metadata: row.get(7)?,
+    })
 }
 
 #[cfg(test)]
@@ -184,11 +204,11 @@ mod tests {
     fn test_dedup_via_save_or_update() {
         let conn = setup();
         let entry1 = ClipboardEntry::from_text("hello".to_string(), None);
-        let id1 = save_or_update(&conn, &entry1, 500).unwrap();
+        let id1 = save_or_update(&conn, &entry1, 500, None).unwrap();
 
         // Same content should update, not insert
         let entry2 = ClipboardEntry::from_text("hello".to_string(), None);
-        let id2 = save_or_update(&conn, &entry2, 500).unwrap();
+        let id2 = save_or_update(&conn, &entry2, 500, None).unwrap();
         assert_eq!(id1, id2);
 
         let entries = list_entries(&conn, 500).unwrap();
@@ -202,6 +222,7 @@ mod tests {
             &conn,
             &ClipboardEntry::from_text("a".to_string(), None),
             500,
+            None,
         )
         .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -209,6 +230,7 @@ mod tests {
             &conn,
             &ClipboardEntry::from_text("b".to_string(), None),
             500,
+            None,
         )
         .unwrap();
 
@@ -250,7 +272,7 @@ mod tests {
         let conn = setup();
         for i in 0..5 {
             let entry = ClipboardEntry::from_text(format!("entry {i}"), None);
-            save_or_update(&conn, &entry, 3).unwrap();
+            save_or_update(&conn, &entry, 3, None).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
@@ -326,5 +348,46 @@ mod tests {
         // Search not matching
         let none = search_entries_page(&conn, "cherry", 10, 0).unwrap();
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn test_prune_expired_no_op_when_none() {
+        let conn = setup();
+        let entry = ClipboardEntry::from_text("hello".to_string(), None);
+        insert_entry(&conn, &entry).unwrap();
+
+        let deleted = prune_expired(&conn, None).unwrap();
+        assert_eq!(deleted, 0);
+
+        let entries = list_entries(&conn, 100).unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_prune_expired_deletes_old_entries() {
+        let conn = setup();
+
+        // Insert a backdated entry (2 hours ago)
+        conn.execute(
+            "INSERT INTO clipboard_entries (content_type, text_content, content_hash, created_at)
+             VALUES ('text', 'old', X'00', strftime('%Y-%m-%dT%H:%M:%f', 'now', '-2 hours'))",
+            [],
+        )
+        .unwrap();
+
+        // Insert a fresh entry
+        let fresh = ClipboardEntry::from_text("fresh".to_string(), None);
+        insert_entry(&conn, &fresh).unwrap();
+
+        let entries = list_entries(&conn, 100).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Prune entries older than 1 hour
+        let deleted = prune_expired(&conn, Some(Duration::from_secs(3600))).unwrap();
+        assert_eq!(deleted, 1);
+
+        let entries = list_entries(&conn, 100).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text_content.as_deref(), Some("fresh"));
     }
 }

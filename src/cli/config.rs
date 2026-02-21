@@ -39,27 +39,18 @@ fn cmd_init(config_path: &Path, force: bool) -> anyhow::Result<()> {
 }
 
 fn cmd_validate(config_path: &Path) -> anyhow::Result<()> {
-    if !config_path.exists() {
-        println!("No config file found at {}. Using defaults.", config_path.display());
-        let config = crate::config::Config::default();
-        if let Err(errors) = config.validate() {
-            for e in &errors {
-                eprintln!("  {e}");
-            }
-            std::process::exit(1);
-        }
-        println!("Configuration is valid.");
-        return Ok(());
-    }
-
-    let config = crate::config::load_config(Some(config_path))
-        .context("failed to load config")?;
+    let config = if config_path.exists() {
+        crate::config::load_config(Some(config_path)).context("failed to load config")?
+    } else {
+        println!(
+            "No config file found at {}. Using defaults.",
+            config_path.display()
+        );
+        crate::config::Config::default()
+    };
 
     if let Err(errors) = config.validate() {
-        for e in &errors {
-            eprintln!("  {e}");
-        }
-        std::process::exit(1);
+        anyhow::bail!("invalid configuration:\n  {}", errors.join("\n  "));
     }
 
     println!("Configuration is valid.");

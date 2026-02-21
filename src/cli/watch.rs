@@ -7,12 +7,13 @@ use rusqlite::Connection;
 #[cfg(target_os = "linux")]
 use arboard::LinuxClipboardKind;
 
+use anyhow::Context;
+
 use crate::clipboard::source_app;
 use crate::clipboard::{self, ClipboardContent};
 use crate::config::SyncMode;
 use crate::config::Config;
 use crate::db::repository;
-use crate::errors::Result;
 use crate::models::entry::{compute_hash, ClipboardEntry};
 
 /// Compute hash for clipboard content, or None if empty.
@@ -47,19 +48,24 @@ fn content_text(content: &ClipboardContent) -> Option<&str> {
     }
 }
 
-fn save_entry(conn: &Connection, entry: &ClipboardEntry, max_history: usize) {
-    if let Err(e) = repository::save_or_update(conn, entry, max_history) {
+fn save_entry(
+    conn: &Connection,
+    entry: &ClipboardEntry,
+    max_history: usize,
+    max_age: Option<Duration>,
+) {
+    if let Err(e) = repository::save_or_update(conn, entry, max_history, max_age) {
         eprintln!("error saving entry: {e}");
     }
 }
 
-pub fn run(conn: &Connection, config: &Config) -> Result<()> {
+pub fn run(conn: &Connection, config: &Config) -> anyhow::Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
         r.store(false, Ordering::SeqCst);
     })
-    .expect("failed to set Ctrl+C handler");
+    .context("failed to set Ctrl+C handler")?;
 
     eprintln!(
         "watching clipboard (interval: {}ms, sync: {})...",
@@ -84,7 +90,7 @@ fn run_disabled(
     running: &Arc<AtomicBool>,
     interval: Duration,
     max_size: u64,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     let mut last_hash: Option<Vec<u8>> = None;
 
     while running.load(Ordering::SeqCst) {
@@ -112,14 +118,13 @@ fn run_disabled(
                     config.max_entry_size_kb
                 );
             } else {
-                save_entry(conn, &entry, config.max_history);
+                save_entry(conn, &entry, config.max_history, config.max_age);
             }
         }
 
         last_hash = Some(hash);
     }
 
-    eprintln!("watch stopped");
     Ok(())
 }
 
@@ -132,7 +137,7 @@ fn run_sync(
     interval: Duration,
     max_size: u64,
     sync_mode: SyncMode,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     let mut last_clipboard_hash: Option<Vec<u8>> = None;
     let mut last_primary_hash: Option<Vec<u8>> = None;
 
@@ -155,7 +160,7 @@ fn run_sync(
             if let Some(ref content) = cb_content {
                 if let Some(entry) = build_entry(content) {
                     if entry.content_size_bytes() as u64 <= max_size {
-                        save_entry(conn, &entry, config.max_history);
+                        save_entry(conn, &entry, config.max_history, config.max_age);
                     }
                 }
             }
@@ -180,7 +185,7 @@ fn run_sync(
                         source_app::detect_source_app(),
                     );
                     if entry.content_size_bytes() as u64 <= max_size {
-                        save_entry(conn, &entry, config.max_history);
+                        save_entry(conn, &entry, config.max_history, config.max_age);
                     }
                 }
             }
@@ -197,7 +202,6 @@ fn run_sync(
         }
     }
 
-    eprintln!("watch stopped");
     Ok(())
 }
 
@@ -209,6 +213,6 @@ fn run_sync(
     interval: Duration,
     max_size: u64,
     _sync_mode: SyncMode,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     run_disabled(conn, config, running, interval, max_size)
 }

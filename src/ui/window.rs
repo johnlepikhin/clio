@@ -5,7 +5,7 @@ use std::rc::Rc;
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{EventControllerKey, Label, ListView, ScrolledWindow, SearchEntry, SingleSelection};
+use gtk4::{EventControllerKey, ListView, ScrolledWindow, SearchEntry, SingleSelection};
 
 use crate::config::Config;
 use crate::db;
@@ -78,9 +78,9 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     // List store
     let store = gio::ListStore::new::<EntryObject>();
 
-    // Load first page from DB
+    // Open DB connection once and share across callbacks
     let conn = match db::init_db(&db_path) {
-        Ok(c) => c,
+        Ok(c) => Rc::new(c),
         Err(e) => {
             eprintln!("error opening database: {e}");
             return;
@@ -104,9 +104,6 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     // Current search query (empty = unfiltered)
     let search_query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
 
-    // Placeholder for empty list
-    let _placeholder = Label::new(Some("No clipboard history"));
-
     let selection = SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(true);
 
@@ -117,7 +114,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
 
     // DB-side search: on search_changed, clear store and query DB
     let store_for_search = store.clone();
-    let db_path_for_search = db_path.clone();
+    let conn_for_search = conn.clone();
     let offset_for_search = offset.clone();
     let all_loaded_for_search = all_loaded.clone();
     let search_query_for_search = search_query.clone();
@@ -128,17 +125,16 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
         *offset_for_search.borrow_mut() = 0;
         *all_loaded_for_search.borrow_mut() = false;
 
-        if let Ok(conn) = db::init_db(&db_path_for_search) {
-            let entries = if query.is_empty() {
-                repository::list_entries_page(&conn, page_size, 0).unwrap_or_default()
-            } else {
-                repository::search_entries_page(&conn, &query, page_size, 0).unwrap_or_default()
-            };
-            let has_more = entries.len() >= page_size;
-            *offset_for_search.borrow_mut() = entries.len();
-            *all_loaded_for_search.borrow_mut() = !has_more;
-            append_entries_to_store(&store_for_search, &entries, preview_chars, image_max_px);
-        }
+        let entries = if query.is_empty() {
+            repository::list_entries_page(&conn_for_search, page_size, 0).unwrap_or_default()
+        } else {
+            repository::search_entries_page(&conn_for_search, &query, page_size, 0)
+                .unwrap_or_default()
+        };
+        let has_more = entries.len() >= page_size;
+        *offset_for_search.borrow_mut() = entries.len();
+        *all_loaded_for_search.borrow_mut() = !has_more;
+        append_entries_to_store(&store_for_search, &entries, preview_chars, image_max_px);
     });
 
     search_entry.set_key_capture_widget(Some(&list_view));
@@ -150,7 +146,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
 
     // Scroll-to-load: load next page when scrolled past 80%
     let store_for_scroll = store.clone();
-    let db_path_for_scroll = db_path.clone();
+    let conn_for_scroll = conn.clone();
     let offset_for_scroll = offset;
     let all_loaded_for_scroll = all_loaded;
     let search_query_for_scroll = search_query;
@@ -171,57 +167,53 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
         }
 
         let current_offset = *offset_for_scroll.borrow();
-        if let Ok(conn) = db::init_db(&db_path_for_scroll) {
-            let query = search_query_for_scroll.borrow().clone();
-            let entries = if query.is_empty() {
-                repository::list_entries_page(&conn, page_size, current_offset)
-                    .unwrap_or_default()
-            } else {
-                repository::search_entries_page(&conn, &query, page_size, current_offset)
-                    .unwrap_or_default()
-            };
-            let fetched = entries.len();
-            if fetched < page_size {
-                *all_loaded_for_scroll.borrow_mut() = true;
-            }
-            *offset_for_scroll.borrow_mut() = current_offset + fetched;
-            append_entries_to_store(&store_for_scroll, &entries, preview_chars, image_max_px);
+        let query = search_query_for_scroll.borrow().clone();
+        let entries = if query.is_empty() {
+            repository::list_entries_page(&conn_for_scroll, page_size, current_offset)
+                .unwrap_or_default()
+        } else {
+            repository::search_entries_page(&conn_for_scroll, &query, page_size, current_offset)
+                .unwrap_or_default()
+        };
+        let fetched = entries.len();
+        if fetched < page_size {
+            *all_loaded_for_scroll.borrow_mut() = true;
         }
+        *offset_for_scroll.borrow_mut() = current_offset + fetched;
+        append_entries_to_store(&store_for_scroll, &entries, preview_chars, image_max_px);
     });
 
     // Handle Enter/click — select entry and set clipboard
-    let conn_path = db_path.clone();
+    let conn_for_activate = conn.clone();
     let window_for_activate = window.clone();
     let sel_for_activate = selection.clone();
     list_view.connect_activate(move |_lv, position| {
         let item = sel_for_activate.item(position);
         if let Some(entry_obj) = item.and_then(|o| o.downcast::<EntryObject>().ok()) {
             let entry_id = entry_obj.id();
-            if let Ok(conn) = db::init_db(&conn_path) {
-                if let Ok(Some(entry)) = repository::get_entry_content(&conn, entry_id) {
-                    match entry.content_type {
-                        ContentType::Text => {
-                            if let Some(text) = &entry.text_content {
-                                let _ = crate::clipboard::write_clipboard_text(text);
-                            }
+            if let Ok(Some(entry)) = repository::get_entry_content(&conn_for_activate, entry_id) {
+                match entry.content_type {
+                    ContentType::Text => {
+                        if let Some(text) = &entry.text_content {
+                            let _ = crate::clipboard::write_clipboard_text(text);
                         }
-                        ContentType::Image => {
-                            if let Some(blob) = &entry.blob_content {
-                                if let Ok(img) = image::load_from_memory(blob) {
-                                    let rgba = img.to_rgba8();
-                                    let (w, h) = rgba.dimensions();
-                                    let _ = crate::clipboard::write_clipboard_image(
-                                        rgba.as_raw(),
-                                        w,
-                                        h,
-                                    );
-                                }
-                            }
-                        }
-                        ContentType::Unknown => {}
                     }
-                    let _ = repository::update_timestamp(&conn, entry_id);
+                    ContentType::Image => {
+                        if let Some(blob) = &entry.blob_content {
+                            if let Ok(img) = image::load_from_memory(blob) {
+                                let rgba = img.to_rgba8();
+                                let (w, h) = rgba.dimensions();
+                                let _ = crate::clipboard::write_clipboard_image(
+                                    rgba.as_raw(),
+                                    w,
+                                    h,
+                                );
+                            }
+                        }
+                    }
+                    ContentType::Unknown => {}
                 }
+                let _ = repository::update_timestamp(&conn_for_activate, entry_id);
             }
             window_for_activate.close();
         }
@@ -230,7 +222,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     // Handle Delete key — remove selected entry
     let store_for_scroll_to = store.clone();
     let store_for_delete = store;
-    let db_path_for_delete = db_path;
+    let conn_for_delete = conn;
     let sel_for_delete = selection;
     let delete_controller = EventControllerKey::new();
     delete_controller.connect_key_pressed(move |_, key, _, _| {
@@ -239,21 +231,8 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
             if let Some(obj) = sel_for_delete.selected_item() {
                 if let Ok(entry_obj) = obj.downcast::<EntryObject>() {
                     let entry_id = entry_obj.id();
-                    if let Ok(conn) = db::init_db(&db_path_for_delete) {
-                        let _ = repository::delete_entry(&conn, entry_id);
-                    }
-                    // Remove from backing store
-                    let n = store_for_delete.n_items();
-                    for i in 0..n {
-                        if let Some(item) = store_for_delete.item(i) {
-                            if let Ok(eo) = item.downcast::<EntryObject>() {
-                                if eo.id() == entry_id {
-                                    store_for_delete.remove(i);
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    let _ = repository::delete_entry(&conn_for_delete, entry_id);
+                    store_for_delete.remove(selected);
                     // Select next item if available
                     let new_n = sel_for_delete.n_items();
                     if new_n > 0 && selected < new_n {

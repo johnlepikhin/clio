@@ -1,4 +1,5 @@
 use std::fmt;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +42,8 @@ pub struct Config {
     pub preview_text_chars: usize,
     pub history_page_size: usize,
     pub image_preview_max_px: i32,
+    #[serde(with = "humantime_serde::option", default)]
+    pub max_age: Option<Duration>,
 }
 
 impl Default for Config {
@@ -56,6 +59,7 @@ impl Default for Config {
             preview_text_chars: 4096,
             history_page_size: 50,
             image_preview_max_px: 640,
+            max_age: None,
         }
     }
 }
@@ -95,6 +99,10 @@ history_page_size: 50
 
 # Maximum image preview size in pixels (longest side, default 640).
 image_preview_max_px: 640
+
+# Delete entries older than this duration (e.g. 30d, 12h, 90m).
+# Omit or leave empty to keep entries forever.
+# max_age: 30d
 "#
         .to_owned()
     }
