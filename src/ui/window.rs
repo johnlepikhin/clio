@@ -226,14 +226,14 @@ fn setup_activate(
             if let Ok(Some(entry)) = repository::get_entry_content(&state.conn, entry_id) {
                 match &entry.content {
                     EntryContent::Text(text) => {
-                        let _ = crate::clipboard::write_clipboard_text(text);
+                        let _ = crate::clipboard::write_clipboard_text_sync(text);
                     }
                     EntryContent::Image(blob) => {
                         if let Ok(img) = image::load_from_memory(blob) {
                             let rgba = img.to_rgba8();
                             let (w, h) = rgba.dimensions();
                             let _ =
-                                crate::clipboard::write_clipboard_image(rgba.as_raw(), w, h);
+                                crate::clipboard::write_clipboard_image_sync(rgba.as_raw(), w, h);
                         }
                     }
                 }

@@ -72,13 +72,8 @@ pub fn read_clipboard() -> Result<ClipboardContent> {
 }
 
 // ---------------------------------------------------------------------------
-// Write (fire-and-forget)
-//
-// These functions spawn a background thread that calls `set().wait()`,
-// which on Wayland keeps serving the clipboard until another app copies.
-// Errors inside the thread are logged to stderr but NOT propagated to the
-// caller — the returned `Ok(())` only means the thread was spawned.
-// For short-lived processes (e.g. `clio copy`) use `write_clipboard_text_sync`.
+// Write (fire-and-forget) — used by the watch daemon to serve clipboard
+// in the background via `set().wait()`.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
@@ -93,52 +88,6 @@ pub fn write_selection_text(kind: LinuxClipboardKind, text: &str) -> Result<()> 
             }
         };
         if let Err(e) = cb.set().wait().clipboard(kind).text(text) {
-            eprintln!("clipboard error: {e}");
-        }
-    });
-    Ok(())
-}
-
-pub fn write_clipboard_text(text: &str) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        write_selection_text(LinuxClipboardKind::Clipboard, text)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let text = text.to_owned();
-        std::thread::spawn(move || {
-            let mut cb = match Clipboard::new() {
-                Ok(cb) => cb,
-                Err(e) => {
-                    eprintln!("clipboard error: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = cb.set().wait().text(text) {
-                eprintln!("clipboard error: {e}");
-            }
-        });
-        Ok(())
-    }
-}
-
-pub fn write_clipboard_image(rgba: &[u8], width: u32, height: u32) -> Result<()> {
-    let rgba = rgba.to_vec();
-    std::thread::spawn(move || {
-        let mut cb = match Clipboard::new() {
-            Ok(cb) => cb,
-            Err(e) => {
-                eprintln!("clipboard error: {e}");
-                return;
-            }
-        };
-        let img = arboard::ImageData {
-            width: width as usize,
-            height: height as usize,
-            bytes: std::borrow::Cow::Owned(rgba),
-        };
-        if let Err(e) = cb.set().wait().image(img) {
             eprintln!("clipboard error: {e}");
         }
     });
@@ -162,6 +111,29 @@ pub fn write_clipboard_text_sync(text: &str) -> Result<()> {
     {
         cb.set()
             .text(text.to_owned())
+            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+    }
+    Ok(())
+}
+
+pub fn write_clipboard_image_sync(rgba: &[u8], width: u32, height: u32) -> Result<()> {
+    let mut cb = open_clipboard()?;
+    let img = arboard::ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: std::borrow::Cow::Borrowed(rgba),
+    };
+    #[cfg(target_os = "linux")]
+    {
+        cb.set()
+            .clipboard(LinuxClipboardKind::Clipboard)
+            .image(img)
+            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cb.set()
+            .image(img)
             .map_err(|e| AppError::Clipboard(e.to_string()))?;
     }
     Ok(())
