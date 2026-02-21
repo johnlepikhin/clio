@@ -1,3 +1,4 @@
+pub mod config;
 pub mod copy;
 pub mod history;
 pub mod show;
@@ -28,4 +29,26 @@ pub enum Commands {
     Watch,
     /// Open history window
     History,
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+}
+
+/// Configuration management subcommands.
+#[derive(Subcommand)]
+pub enum ConfigCommands {
+    /// Show current effective configuration
+    Show,
+    /// Create default configuration file
+    Init {
+        /// Overwrite existing file
+        #[arg(long)]
+        force: bool,
+    },
+    /// Validate configuration file
+    Validate,
+    /// Print configuration file path
+    Path,
 }

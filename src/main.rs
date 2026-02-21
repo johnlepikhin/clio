@@ -34,5 +34,12 @@ fn main() -> anyhow::Result<()> {
             cli::watch::run(&conn, &config).map_err(Into::into)
         }
         Commands::History => cli::history::run(&config, db_path).map_err(Into::into),
+        Commands::Config { ref command } => {
+            let config_path = cli
+                .config
+                .clone()
+                .unwrap_or_else(config::default_config_path);
+            cli::config::run(&config_path, command)
+        }
     }
 }

@@ -8,10 +8,14 @@ use directories::ProjectDirs;
 
 use crate::errors::{AppError, Result};
 
+pub fn default_config_path() -> PathBuf {
+    config_dir().join("config.yaml")
+}
+
 pub fn load_config(override_path: Option<&Path>) -> Result<Config> {
     let path = match override_path {
         Some(p) => p.to_path_buf(),
-        None => config_dir().join("config.yaml"),
+        None => default_config_path(),
     };
 
     if !path.exists() {
@@ -108,5 +112,47 @@ mod tests {
         let yaml = "db_path: /tmp/custom.db\n";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.db_path.as_deref(), Some("/tmp/custom.db"));
+    }
+
+    #[test]
+    fn test_serialize_deserialize_roundtrip() {
+        let config = Config::default();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let restored: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(restored.max_history, config.max_history);
+        assert_eq!(restored.watch_interval_ms, config.watch_interval_ms);
+        assert_eq!(restored.max_entry_size_kb, config.max_entry_size_kb);
+        assert_eq!(restored.window_width, config.window_width);
+        assert_eq!(restored.window_height, config.window_height);
+        assert_eq!(restored.db_path, config.db_path);
+    }
+
+    #[test]
+    fn test_default_yaml_parses() {
+        let yaml = Config::default_yaml();
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config.max_history, 500);
+        assert_eq!(config.watch_interval_ms, 500);
+        assert_eq!(config.max_entry_size_kb, 51200);
+        assert_eq!(config.window_width, 600);
+        assert_eq!(config.window_height, 400);
+        assert!(config.db_path.is_none());
+    }
+
+    #[test]
+    fn test_validate_default_config() {
+        let config = Config::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_invalid_config() {
+        let mut config = Config::default();
+        config.max_history = 0;
+        config.window_width = 0;
+        let errors = config.validate().unwrap_err();
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("max_history"));
+        assert!(errors[1].contains("window_width"));
     }
 }
