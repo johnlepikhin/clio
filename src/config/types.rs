@@ -40,6 +40,7 @@ pub struct Config {
     pub sync_mode: SyncMode,
     pub preview_text_chars: usize,
     pub history_page_size: usize,
+    pub image_preview_max_px: i32,
 }
 
 impl Default for Config {
@@ -54,6 +55,7 @@ impl Default for Config {
             sync_mode: SyncMode::default(),
             preview_text_chars: 4096,
             history_page_size: 50,
+            image_preview_max_px: 640,
         }
     }
 }
@@ -90,6 +92,9 @@ preview_text_chars: 4096
 
 # Number of entries loaded per page in the history window (default 50).
 history_page_size: 50
+
+# Maximum image preview size in pixels (longest side, default 640).
+image_preview_max_px: 640
 "#
         .to_owned()
     }
@@ -119,6 +124,9 @@ history_page_size: 50
         }
         if self.history_page_size == 0 {
             errors.push("history_page_size must be greater than 0".to_owned());
+        }
+        if self.image_preview_max_px <= 0 {
+            errors.push("image_preview_max_px must be greater than 0".to_owned());
         }
 
         if errors.is_empty() {

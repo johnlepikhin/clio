@@ -265,4 +265,40 @@ mod tests {
         assert_eq!(config.preview_text_chars, 4096);
         assert_eq!(config.history_page_size, 50);
     }
+
+    #[test]
+    fn test_image_preview_max_px_default() {
+        let config = Config::default();
+        assert_eq!(config.image_preview_max_px, 640);
+    }
+
+    #[test]
+    fn test_image_preview_max_px_deserialization() {
+        let yaml = "image_preview_max_px: 200\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.image_preview_max_px, 200);
+    }
+
+    #[test]
+    fn test_validate_image_preview_max_px_zero() {
+        let mut config = Config::default();
+        config.image_preview_max_px = 0;
+        let errors = config.validate().unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("image_preview_max_px")));
+    }
+
+    #[test]
+    fn test_validate_image_preview_max_px_negative() {
+        let mut config = Config::default();
+        config.image_preview_max_px = -5;
+        let errors = config.validate().unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("image_preview_max_px")));
+    }
+
+    #[test]
+    fn test_default_yaml_has_image_preview_max_px() {
+        let yaml = Config::default_yaml();
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(config.image_preview_max_px, 640);
+    }
 }

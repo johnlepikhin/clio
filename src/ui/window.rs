@@ -29,6 +29,7 @@ fn append_entries_to_store(
     store: &gio::ListStore,
     entries: &[ClipboardEntry],
     preview_chars: usize,
+    image_max_px: i32,
 ) {
     for entry in entries {
         let id = entry.id.unwrap_or(0);
@@ -39,7 +40,7 @@ fn append_entries_to_store(
             let thumb = entry
                 .blob_content
                 .as_ref()
-                .and_then(|blob| create_thumbnail_texture(blob));
+                .and_then(|blob| create_thumbnail_texture(blob, image_max_px));
             (String::new(), thumb)
         } else {
             let raw = entry.text_content.as_deref().unwrap_or("");
@@ -57,6 +58,7 @@ fn append_entries_to_store(
 pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) {
     let page_size = config.history_page_size;
     let preview_chars = config.preview_text_chars;
+    let image_max_px = config.image_preview_max_px;
 
     let window = gtk4::ApplicationWindow::builder()
         .application(app)
@@ -94,7 +96,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     };
 
     let has_more = entries.len() >= page_size;
-    append_entries_to_store(&store, &entries, preview_chars);
+    append_entries_to_store(&store, &entries, preview_chars, image_max_px);
 
     // Pagination state
     let offset = Rc::new(RefCell::new(entries.len()));
@@ -134,7 +136,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
             let has_more = entries.len() >= page_size;
             *offset_for_search.borrow_mut() = entries.len();
             *all_loaded_for_search.borrow_mut() = !has_more;
-            append_entries_to_store(&store_for_search, &entries, preview_chars);
+            append_entries_to_store(&store_for_search, &entries, preview_chars, image_max_px);
         }
     });
 
@@ -182,7 +184,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
                 *all_loaded_for_scroll.borrow_mut() = true;
             }
             *offset_for_scroll.borrow_mut() = current_offset + fetched;
-            append_entries_to_store(&store_for_scroll, &entries, preview_chars);
+            append_entries_to_store(&store_for_scroll, &entries, preview_chars, image_max_px);
         }
     });
 
@@ -263,9 +265,10 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     });
     list_view.add_controller(delete_controller);
 
-    // Handle Escape — close window
+    // Handle Escape — close window (capture phase so SearchEntry doesn't intercept)
     let window_for_escape = window.clone();
     let escape_controller = EventControllerKey::new();
+    escape_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
     escape_controller.connect_key_pressed(move |_, key, _, _| {
         if key == gtk4::gdk::Key::Escape {
             window_for_escape.close();
@@ -277,6 +280,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
 
     window.set_child(Some(&main_box));
     window.present();
+    list_view.grab_focus();
 }
 
 #[cfg(test)]
@@ -325,12 +329,67 @@ mod tests {
         assert_eq!(result, "");
         assert!(!truncated);
     }
+
+    // compute_thumbnail_size tests
+
+    #[test]
+    fn test_thumbnail_small_image_no_scaling() {
+        assert_eq!(compute_thumbnail_size(100, 80, 320), (100, 80));
+    }
+
+    #[test]
+    fn test_thumbnail_exact_boundary() {
+        assert_eq!(compute_thumbnail_size(320, 320, 320), (320, 320));
+    }
+
+    #[test]
+    fn test_thumbnail_landscape() {
+        // 800x400, max 320 → scale 0.4 → 320x160
+        assert_eq!(compute_thumbnail_size(800, 400, 320), (320, 160));
+    }
+
+    #[test]
+    fn test_thumbnail_portrait() {
+        // 400x800, max 320 → scale 0.4 → 160x320
+        assert_eq!(compute_thumbnail_size(400, 800, 320), (160, 320));
+    }
+
+    #[test]
+    fn test_thumbnail_square_large() {
+        // 640x640, max 320 → scale 0.5 → 320x320
+        assert_eq!(compute_thumbnail_size(640, 640, 320), (320, 320));
+    }
 }
 
-fn create_thumbnail_texture(png_bytes: &[u8]) -> Option<gtk4::gdk::Texture> {
+/// Compute scaled thumbnail dimensions preserving aspect ratio.
+/// If both dimensions are within `max_px`, returns original size.
+pub fn compute_thumbnail_size(src_w: i32, src_h: i32, max_px: i32) -> (i32, i32) {
+    if src_w <= max_px && src_h <= max_px {
+        return (src_w, src_h);
+    }
+    let max_side = src_w.max(src_h) as f64;
+    let scale = max_px as f64 / max_side;
+    let dst_w = (src_w as f64 * scale) as i32;
+    let dst_h = (src_h as f64 * scale) as i32;
+    (dst_w.max(1), dst_h.max(1))
+}
+
+fn create_thumbnail_texture(png_bytes: &[u8], max_px: i32) -> Option<gtk4::gdk::Texture> {
+    use gtk4::gdk_pixbuf::InterpType;
+
     let pixbuf_loader = gtk4::gdk_pixbuf::PixbufLoader::new();
     pixbuf_loader.write(png_bytes).ok()?;
     pixbuf_loader.close().ok()?;
     let pixbuf = pixbuf_loader.pixbuf()?;
-    Some(gtk4::gdk::Texture::for_pixbuf(&pixbuf))
+
+    let src_w = pixbuf.width();
+    let src_h = pixbuf.height();
+    let (dst_w, dst_h) = compute_thumbnail_size(src_w, src_h, max_px);
+
+    if dst_w == src_w && dst_h == src_h {
+        return Some(gtk4::gdk::Texture::for_pixbuf(&pixbuf));
+    }
+
+    let scaled = pixbuf.scale_simple(dst_w, dst_h, InterpType::Bilinear)?;
+    Some(gtk4::gdk::Texture::for_pixbuf(&scaled))
 }
