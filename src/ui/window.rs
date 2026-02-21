@@ -228,6 +228,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     });
 
     // Handle Delete key — remove selected entry
+    let store_for_scroll_to = store.clone();
     let store_for_delete = store;
     let db_path_for_delete = db_path;
     let sel_for_delete = selection;
@@ -282,6 +283,9 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     window.set_child(Some(&main_box));
     window.present();
     list_view.grab_focus();
+    if store_for_scroll_to.n_items() > 0 {
+        list_view.scroll_to(0, gtk4::ListScrollFlags::FOCUS, None::<gtk4::ScrollInfo>);
+    }
 }
 
 #[cfg(test)]
