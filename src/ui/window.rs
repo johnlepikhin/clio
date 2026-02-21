@@ -16,6 +16,16 @@ use crate::models::entry::{ClipboardEntry, EntryContent};
 use super::entry_object::EntryObject;
 use super::entry_row;
 
+/// Content selected by the user for clipboard restore (passed out of GTK loop).
+pub enum SelectedContent {
+    Text(String),
+    Image {
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+}
+
 /// Shared state for history window callbacks.
 struct WindowState {
     conn: Rc<Connection>,
@@ -106,7 +116,12 @@ pub fn truncate_preview(text: &str, max_chars: usize) -> (String, bool) {
     }
 }
 
-pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) {
+pub fn build_window(
+    app: &gtk4::Application,
+    config: &Config,
+    db_path: PathBuf,
+    selected: Rc<RefCell<Option<SelectedContent>>>,
+) {
     let conn = match db::init_db(&db_path) {
         Ok(c) => Rc::new(c),
         Err(e) => {
@@ -173,7 +188,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     main_box.append(&scrolled);
 
     setup_scroll(&scrolled, &state);
-    setup_activate(&list_view, &state, &selection, &window);
+    setup_activate(&list_view, &state, &selection, &window, selected);
     setup_delete(&list_view, &state, &selection);
     setup_escape(&window);
 
@@ -215,6 +230,7 @@ fn setup_activate(
     state: &Rc<WindowState>,
     selection: &SingleSelection,
     window: &gtk4::ApplicationWindow,
+    selected: Rc<RefCell<Option<SelectedContent>>>,
 ) {
     let state = state.clone();
     let sel = selection.clone();
@@ -226,14 +242,17 @@ fn setup_activate(
             if let Ok(Some(entry)) = repository::get_entry_content(&state.conn, entry_id) {
                 match &entry.content {
                     EntryContent::Text(text) => {
-                        let _ = crate::clipboard::write_clipboard_text_sync(text);
+                        *selected.borrow_mut() = Some(SelectedContent::Text(text.clone()));
                     }
                     EntryContent::Image(blob) => {
                         if let Ok(img) = image::load_from_memory(blob) {
                             let rgba = img.to_rgba8();
                             let (w, h) = rgba.dimensions();
-                            let _ =
-                                crate::clipboard::write_clipboard_image_sync(rgba.as_raw(), w, h);
+                            *selected.borrow_mut() = Some(SelectedContent::Image {
+                                rgba: rgba.into_raw(),
+                                width: w,
+                                height: h,
+                            });
                         }
                     }
                 }

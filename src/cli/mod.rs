@@ -36,6 +36,9 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Internal: serve clipboard content from stdin (used by spawn_clipboard_server)
+    #[command(hide = true, name = "_serve-clipboard")]
+    ServeClipboard,
 }
 
 /// Configuration management subcommands.

@@ -1,3 +1,4 @@
+pub mod serve;
 pub mod source_app;
 
 use arboard::Clipboard;
@@ -95,46 +96,95 @@ pub fn write_selection_text(kind: LinuxClipboardKind, text: &str) -> Result<()> 
 }
 
 // ---------------------------------------------------------------------------
-// Write (synchronous) — for short-lived processes like `clio copy`.
+// Write — for short-lived processes (`clio copy`, `clio history`).
+// On Linux, spawns a background `_serve-clipboard` process that holds
+// selection ownership until another app takes the clipboard.
 // ---------------------------------------------------------------------------
 
-pub fn write_clipboard_text_sync(text: &str) -> Result<()> {
-    let mut cb = open_clipboard()?;
-    #[cfg(target_os = "linux")]
-    {
-        cb.set()
-            .clipboard(LinuxClipboardKind::Clipboard)
-            .text(text.to_owned())
-            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+#[cfg(target_os = "linux")]
+fn spawn_clipboard_server(content: &ClipboardContent) -> Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let exe = std::env::current_exe()
+        .map_err(|e| AppError::Clipboard(format!("current_exe: {e}")))?;
+
+    let mut child = Command::new(exe)
+        .arg("_serve-clipboard")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| AppError::Clipboard(format!("spawn: {e}")))?;
+
+    let stdin = child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| AppError::Clipboard("no stdin".into()))?;
+
+    match content {
+        ClipboardContent::Text(text) => {
+            let bytes = text.as_bytes();
+            stdin.write_all(&[0x01])?;
+            stdin.write_all(&(bytes.len() as u32).to_be_bytes())?;
+            stdin.write_all(bytes)?;
+        }
+        ClipboardContent::Image {
+            width,
+            height,
+            rgba_bytes,
+        } => {
+            stdin.write_all(&[0x02])?;
+            stdin.write_all(&(rgba_bytes.len() as u32).to_be_bytes())?;
+            stdin.write_all(&width.to_be_bytes())?;
+            stdin.write_all(&height.to_be_bytes())?;
+            stdin.write_all(rgba_bytes)?;
+        }
+        ClipboardContent::Empty => {
+            return Ok(());
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        cb.set()
-            .text(text.to_owned())
-            .map_err(|e| AppError::Clipboard(e.to_string()))?;
-    }
+
+    // Drop stdin so the child can finish reading, then detach.
+    drop(child);
     Ok(())
 }
 
-pub fn write_clipboard_image_sync(rgba: &[u8], width: u32, height: u32) -> Result<()> {
-    let mut cb = open_clipboard()?;
-    let img = arboard::ImageData {
-        width: width as usize,
-        height: height as usize,
-        bytes: std::borrow::Cow::Borrowed(rgba),
-    };
+pub fn write_clipboard_text_sync(text: &str) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        cb.set()
-            .clipboard(LinuxClipboardKind::Clipboard)
-            .image(img)
-            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+        spawn_clipboard_server(&ClipboardContent::Text(text.to_owned()))
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let mut cb = open_clipboard()?;
+        cb.set()
+            .text(text.to_owned())
+            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+        Ok(())
+    }
+}
+
+pub fn write_clipboard_image_sync(width: u32, height: u32, rgba_bytes: Vec<u8>) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        spawn_clipboard_server(&ClipboardContent::Image {
+            width,
+            height,
+            rgba_bytes,
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut cb = open_clipboard()?;
+        let img = arboard::ImageData {
+            width: width as usize,
+            height: height as usize,
+            bytes: std::borrow::Cow::Owned(rgba_bytes),
+        };
         cb.set()
             .image(img)
             .map_err(|e| AppError::Clipboard(e.to_string()))?;
+        Ok(())
     }
-    Ok(())
 }

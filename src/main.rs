@@ -15,6 +15,11 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 fn main() -> anyhow::Result<()> {
+    // Fast path: _serve-clipboard needs no config/db — handle before parsing anything heavy.
+    if let Some("_serve-clipboard") = std::env::args().nth(1).as_deref() {
+        return clipboard::serve::run().map_err(Into::into);
+    }
+
     let cli = Cli::parse();
     let config = config::load_config(cli.config.as_deref()).context("failed to load config")?;
 
@@ -43,5 +48,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(config::default_config_path);
             cli::config::run(&config_path, command)
         }
+        // Handled by early return above; unreachable via normal flow.
+        Commands::ServeClipboard => clipboard::serve::run().map_err(Into::into),
     }
 }
