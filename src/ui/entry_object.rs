@@ -1,0 +1,57 @@
+use std::cell::RefCell;
+
+use glib::Properties;
+use gtk4::gdk;
+use gtk4::glib;
+use gtk4::prelude::*;
+use gtk4::subclass::prelude::*;
+
+mod imp {
+    use super::*;
+
+    #[derive(Default, Properties)]
+    #[properties(wrapper_type = super::EntryObject)]
+    pub struct EntryObject {
+        #[property(get, set)]
+        id: RefCell<i64>,
+        #[property(get, set)]
+        preview_text: RefCell<String>,
+        #[property(get, set)]
+        content_type: RefCell<String>,
+        #[property(get, set)]
+        created_at: RefCell<String>,
+        #[property(get, set)]
+        thumbnail: RefCell<Option<gdk::Texture>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for EntryObject {
+        const NAME: &'static str = "ClioEntryObject";
+        type Type = super::EntryObject;
+    }
+
+    #[glib::derived_properties]
+    impl ObjectImpl for EntryObject {}
+}
+
+glib::wrapper! {
+    pub struct EntryObject(ObjectSubclass<imp::EntryObject>);
+}
+
+impl EntryObject {
+    pub fn new(
+        id: i64,
+        preview_text: &str,
+        content_type: &str,
+        created_at: &str,
+        thumbnail: Option<gdk::Texture>,
+    ) -> Self {
+        glib::Object::builder()
+            .property("id", id)
+            .property("preview-text", preview_text)
+            .property("content-type", content_type)
+            .property("created-at", created_at)
+            .property("thumbnail", thumbnail)
+            .build()
+    }
+}

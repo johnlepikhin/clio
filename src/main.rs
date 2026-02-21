@@ -1,0 +1,38 @@
+mod cli;
+mod clipboard;
+mod config;
+mod db;
+mod errors;
+mod models;
+mod ui;
+
+use std::path::PathBuf;
+
+use anyhow::Context;
+use clap::Parser;
+
+use cli::{Cli, Commands};
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let config = config::load_config(cli.config.as_deref()).context("failed to load config")?;
+
+    let db_path = config
+        .db_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config::data_dir().join("clio.db"));
+
+    match cli.command {
+        Commands::Show => cli::show::run().map_err(Into::into),
+        Commands::Copy => {
+            let conn = db::init_db(&db_path).context("failed to initialize database")?;
+            cli::copy::run(&conn, &config).map_err(Into::into)
+        }
+        Commands::Watch => {
+            let conn = db::init_db(&db_path).context("failed to initialize database")?;
+            cli::watch::run(&conn, &config).map_err(Into::into)
+        }
+        Commands::History => cli::history::run(&config, db_path).map_err(Into::into),
+    }
+}
