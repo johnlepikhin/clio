@@ -1,6 +1,7 @@
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 
@@ -11,10 +12,72 @@ use anyhow::Context;
 
 use crate::clipboard::source_app;
 use crate::clipboard::{self, ClipboardContent};
-use crate::config::SyncMode;
-use crate::config::Config;
+use crate::config::{Config, SyncMode};
 use crate::db::repository;
 use crate::models::entry::{compute_hash, ClipboardEntry};
+
+/// Shared state for the watch loop.
+struct WatchState<'a> {
+    conn: &'a Connection,
+    max_history: usize,
+    max_age: Option<Duration>,
+    max_size: u64,
+    prune_interval: Duration,
+    last_prune: Cell<Instant>,
+}
+
+impl WatchState<'_> {
+    /// Run prune_expired periodically, independent of clipboard changes.
+    fn maybe_prune(&self) {
+        if self.max_age.is_none() {
+            return;
+        }
+        if self.last_prune.get().elapsed() < self.prune_interval {
+            return;
+        }
+        if let Err(e) = repository::prune_expired(self.conn, self.max_age) {
+            eprintln!("error pruning expired entries: {e}");
+        }
+        self.last_prune.set(Instant::now());
+    }
+
+    /// Build a ClipboardEntry from content, or None if empty.
+    fn build_entry(content: &ClipboardContent) -> Option<ClipboardEntry> {
+        match content {
+            ClipboardContent::Text(t) => {
+                Some(ClipboardEntry::from_text(t.clone(), source_app::detect_source_app()))
+            }
+            ClipboardContent::Image {
+                width,
+                height,
+                rgba_bytes,
+            } => ClipboardEntry::from_image(*width, *height, rgba_bytes, source_app::detect_source_app()).ok(),
+            ClipboardContent::Empty => None,
+        }
+    }
+
+    /// Save entry to DB if within size limit.
+    fn save_if_fits(&self, entry: &ClipboardEntry) {
+        if entry.content_size_bytes() as u64 > self.max_size {
+            eprintln!(
+                "skipping entry: size {} KB exceeds limit {} KB",
+                entry.content_size_bytes() / 1024,
+                self.max_size / 1024
+            );
+            return;
+        }
+        if let Err(e) = repository::save_or_update(self.conn, entry, self.max_history, self.max_age) {
+            eprintln!("error saving entry: {e}");
+        }
+    }
+
+    /// Process a clipboard content change: build entry and save.
+    fn process_change(&self, content: &ClipboardContent) {
+        if let Some(entry) = Self::build_entry(content) {
+            self.save_if_fits(&entry);
+        }
+    }
+}
 
 /// Compute hash for clipboard content, or None if empty.
 fn content_hash(content: &ClipboardContent) -> Option<Vec<u8>> {
@@ -25,37 +88,11 @@ fn content_hash(content: &ClipboardContent) -> Option<Vec<u8>> {
     }
 }
 
-/// Build a ClipboardEntry from content for saving to history.
-fn build_entry(content: &ClipboardContent) -> Option<ClipboardEntry> {
-    match content {
-        ClipboardContent::Text(t) => {
-            Some(ClipboardEntry::from_text(t.clone(), source_app::detect_source_app()))
-        }
-        ClipboardContent::Image {
-            width,
-            height,
-            rgba_bytes,
-        } => ClipboardEntry::from_image(*width, *height, rgba_bytes, source_app::detect_source_app()).ok(),
-        ClipboardContent::Empty => None,
-    }
-}
-
 /// Extract text from clipboard content for syncing.
 fn content_text(content: &ClipboardContent) -> Option<&str> {
     match content {
         ClipboardContent::Text(t) => Some(t.as_str()),
         _ => None,
-    }
-}
-
-fn save_entry(
-    conn: &Connection,
-    entry: &ClipboardEntry,
-    max_history: usize,
-    max_age: Option<Duration>,
-) {
-    if let Err(e) = repository::save_or_update(conn, entry, max_history, max_age) {
-        eprintln!("error saving entry: {e}");
     }
 }
 
@@ -72,29 +109,37 @@ pub fn run(conn: &Connection, config: &Config) -> anyhow::Result<()> {
         config.watch_interval_ms, config.sync_mode
     );
 
+    let prune_interval = Duration::from_millis(config.watch_interval_ms * 120)
+        .clamp(Duration::from_secs(30), Duration::from_secs(300));
+    let state = WatchState {
+        conn,
+        max_history: config.max_history,
+        max_age: config.max_age,
+        max_size: config.max_entry_size_kb * 1024,
+        prune_interval,
+        last_prune: Cell::new(Instant::now()),
+    };
     let interval = Duration::from_millis(config.watch_interval_ms);
-    let max_size = config.max_entry_size_kb * 1024;
     let sync_mode = config.sync_mode;
 
     if sync_mode == SyncMode::Disabled {
-        return run_disabled(conn, config, &running, interval, max_size);
+        return run_disabled(&state, &running, interval);
     }
 
-    run_sync(conn, config, &running, interval, max_size, sync_mode)
+    run_sync(&state, &running, interval, sync_mode)
 }
 
 /// Disabled mode: only monitor CLIPBOARD, no PRIMARY interaction.
 fn run_disabled(
-    conn: &Connection,
-    config: &Config,
+    state: &WatchState<'_>,
     running: &Arc<AtomicBool>,
     interval: Duration,
-    max_size: u64,
 ) -> anyhow::Result<()> {
     let mut last_hash: Option<Vec<u8>> = None;
 
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(interval);
+        state.maybe_prune();
 
         let content = match clipboard::read_clipboard() {
             Ok(c) => c,
@@ -110,18 +155,7 @@ fn run_disabled(
             continue;
         }
 
-        if let Some(entry) = build_entry(&content) {
-            if entry.content_size_bytes() as u64 > max_size {
-                eprintln!(
-                    "skipping entry: size {} KB exceeds limit {} KB",
-                    entry.content_size_bytes() / 1024,
-                    config.max_entry_size_kb
-                );
-            } else {
-                save_entry(conn, &entry, config.max_history, config.max_age);
-            }
-        }
-
+        state.process_change(&content);
         last_hash = Some(hash);
     }
 
@@ -131,11 +165,9 @@ fn run_disabled(
 /// Sync-enabled modes: monitor both CLIPBOARD and PRIMARY, sync per mode.
 #[cfg(target_os = "linux")]
 fn run_sync(
-    conn: &Connection,
-    config: &Config,
+    state: &WatchState<'_>,
     running: &Arc<AtomicBool>,
     interval: Duration,
-    max_size: u64,
     sync_mode: SyncMode,
 ) -> anyhow::Result<()> {
     let mut last_clipboard_hash: Option<Vec<u8>> = None;
@@ -143,31 +175,24 @@ fn run_sync(
 
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(interval);
+        state.maybe_prune();
 
-        // Read both selections
         let cb_content = clipboard::read_selection(LinuxClipboardKind::Clipboard).ok();
         let pr_content = clipboard::read_selection(LinuxClipboardKind::Primary).ok();
 
-        // Compute hashes
         let cb_hash = cb_content.as_ref().and_then(content_hash);
         let pr_hash = pr_content.as_ref().and_then(content_hash);
 
         let cb_changed = cb_hash.as_ref().is_some_and(|h| last_clipboard_hash.as_ref() != Some(h));
         let pr_changed = pr_hash.as_ref().is_some_and(|h| last_primary_hash.as_ref() != Some(h));
 
-        // Process CLIPBOARD change
         if cb_changed {
             if let Some(ref content) = cb_content {
-                if let Some(entry) = build_entry(content) {
-                    if entry.content_size_bytes() as u64 <= max_size {
-                        save_entry(conn, &entry, config.max_history, config.max_age);
-                    }
-                }
+                state.process_change(content);
             }
 
             last_clipboard_hash = cb_hash.clone();
 
-            // Sync CLIPBOARD → PRIMARY (Both or ToPrimary)
             if matches!(sync_mode, SyncMode::Both | SyncMode::ToPrimary) {
                 if let Some(text) = cb_content.as_ref().and_then(content_text) {
                     let _ = clipboard::write_selection_text(LinuxClipboardKind::Primary, text);
@@ -176,7 +201,6 @@ fn run_sync(
             }
         }
 
-        // Process PRIMARY change
         if pr_changed {
             if let Some(ref content) = pr_content {
                 if let Some(text) = content_text(content) {
@@ -184,15 +208,12 @@ fn run_sync(
                         text.to_owned(),
                         source_app::detect_source_app(),
                     );
-                    if entry.content_size_bytes() as u64 <= max_size {
-                        save_entry(conn, &entry, config.max_history, config.max_age);
-                    }
+                    state.save_if_fits(&entry);
                 }
             }
 
             last_primary_hash = pr_hash;
 
-            // Sync PRIMARY → CLIPBOARD (Both or ToClipboard)
             if matches!(sync_mode, SyncMode::Both | SyncMode::ToClipboard) {
                 if let Some(text) = pr_content.as_ref().and_then(content_text) {
                     let _ = clipboard::write_selection_text(LinuxClipboardKind::Clipboard, text);
@@ -207,12 +228,10 @@ fn run_sync(
 
 #[cfg(not(target_os = "linux"))]
 fn run_sync(
-    conn: &Connection,
-    config: &Config,
+    state: &WatchState<'_>,
     running: &Arc<AtomicBool>,
     interval: Duration,
-    max_size: u64,
     _sync_mode: SyncMode,
 ) -> anyhow::Result<()> {
-    run_disabled(conn, config, running, interval, max_size)
+    run_disabled(state, running, interval)
 }

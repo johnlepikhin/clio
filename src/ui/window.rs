@@ -6,14 +6,95 @@ use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{EventControllerKey, ListView, ScrolledWindow, SearchEntry, SingleSelection};
+use rusqlite::Connection;
 
 use crate::config::Config;
 use crate::db;
 use crate::db::repository;
-use crate::models::entry::{ClipboardEntry, ContentType};
+use crate::models::entry::{ClipboardEntry, EntryContent};
 
 use super::entry_object::EntryObject;
 use super::entry_row;
+
+/// Shared state for history window callbacks.
+struct WindowState {
+    conn: Rc<Connection>,
+    store: gio::ListStore,
+    offset: RefCell<usize>,
+    all_loaded: RefCell<bool>,
+    search_query: RefCell<String>,
+    page_size: usize,
+    preview_chars: usize,
+    image_max_px: i32,
+}
+
+impl WindowState {
+    /// Fetch a page of entries from DB (respects current search query).
+    fn fetch_page(&self, offset: usize) -> Vec<ClipboardEntry> {
+        let query = self.search_query.borrow().clone();
+        if query.is_empty() {
+            repository::list_entries_page(&self.conn, self.page_size, offset).unwrap_or_default()
+        } else {
+            repository::search_entries_page(&self.conn, &query, self.page_size, offset)
+                .unwrap_or_default()
+        }
+    }
+
+    /// Append entries to the backing ListStore.
+    fn append_entries(&self, entries: &[ClipboardEntry]) {
+        for entry in entries {
+            let id = entry.id.unwrap_or(0);
+            let ct = entry.content.content_type().as_str();
+            let created = entry.created_at.as_deref().unwrap_or("");
+
+            let (preview, thumbnail) = match &entry.content {
+                EntryContent::Image(blob) => {
+                    let thumb = create_thumbnail_texture(blob, self.image_max_px);
+                    (String::new(), thumb)
+                }
+                EntryContent::Text(text) => {
+                    let (mut preview, was_truncated) =
+                        truncate_preview(text, self.preview_chars);
+                    if was_truncated {
+                        preview.push('…');
+                    }
+                    (preview, None)
+                }
+            };
+
+            self.store
+                .append(&EntryObject::new(id, &preview, ct, created, thumbnail));
+        }
+    }
+
+    /// Reset pagination, clear store, load first page.
+    fn reload(&self) {
+        self.store.remove_all();
+        *self.offset.borrow_mut() = 0;
+        *self.all_loaded.borrow_mut() = false;
+
+        let entries = self.fetch_page(0);
+        let has_more = entries.len() >= self.page_size;
+        *self.offset.borrow_mut() = entries.len();
+        *self.all_loaded.borrow_mut() = !has_more;
+        self.append_entries(&entries);
+    }
+
+    /// Load the next page (for infinite scroll).
+    fn load_next_page(&self) {
+        if *self.all_loaded.borrow() {
+            return;
+        }
+        let current_offset = *self.offset.borrow();
+        let entries = self.fetch_page(current_offset);
+        let fetched = entries.len();
+        if fetched < self.page_size {
+            *self.all_loaded.borrow_mut() = true;
+        }
+        *self.offset.borrow_mut() = current_offset + fetched;
+        self.append_entries(&entries);
+    }
+}
 
 pub fn truncate_preview(text: &str, max_chars: usize) -> (String, bool) {
     let char_count = text.chars().count();
@@ -25,41 +106,42 @@ pub fn truncate_preview(text: &str, max_chars: usize) -> (String, bool) {
     }
 }
 
-fn append_entries_to_store(
-    store: &gio::ListStore,
-    entries: &[ClipboardEntry],
-    preview_chars: usize,
-    image_max_px: i32,
-) {
-    for entry in entries {
-        let id = entry.id.unwrap_or(0);
-        let ct = entry.content_type.as_str();
-        let created = entry.created_at.as_deref().unwrap_or("");
-
-        let (preview, thumbnail) = if entry.content_type == ContentType::Image {
-            let thumb = entry
-                .blob_content
-                .as_ref()
-                .and_then(|blob| create_thumbnail_texture(blob, image_max_px));
-            (String::new(), thumb)
-        } else {
-            let raw = entry.text_content.as_deref().unwrap_or("");
-            let (mut text, was_truncated) = truncate_preview(raw, preview_chars);
-            if was_truncated {
-                text.push('…');
-            }
-            (text, None)
-        };
-
-        store.append(&EntryObject::new(id, &preview, ct, created, thumbnail));
-    }
-}
-
 pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) {
-    let page_size = config.history_page_size;
-    let preview_chars = config.preview_text_chars;
-    let image_max_px = config.image_preview_max_px;
+    let conn = match db::init_db(&db_path) {
+        Ok(c) => Rc::new(c),
+        Err(e) => {
+            eprintln!("error opening database: {e}");
+            return;
+        }
+    };
 
+    let store = gio::ListStore::new::<EntryObject>();
+
+    let state = Rc::new(WindowState {
+        conn,
+        store: store.clone(),
+        offset: RefCell::new(0),
+        all_loaded: RefCell::new(false),
+        search_query: RefCell::new(String::new()),
+        page_size: config.history_page_size,
+        preview_chars: config.preview_text_chars,
+        image_max_px: config.image_preview_max_px,
+    });
+
+    // Load first page
+    let entries = match repository::list_entries_page(&state.conn, state.page_size, 0) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("error loading entries: {e}");
+            return;
+        }
+    };
+    let has_more = entries.len() >= state.page_size;
+    *state.offset.borrow_mut() = entries.len();
+    *state.all_loaded.borrow_mut() = !has_more;
+    state.append_entries(&entries);
+
+    // Build widgets
     let window = gtk4::ApplicationWindow::builder()
         .application(app)
         .title("Clio History")
@@ -70,39 +152,9 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
 
     let main_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
 
-    // Search entry for filtering
     let search_entry = SearchEntry::new();
     search_entry.set_placeholder_text(Some("Type to filter..."));
     main_box.append(&search_entry);
-
-    // List store
-    let store = gio::ListStore::new::<EntryObject>();
-
-    // Open DB connection once and share across callbacks
-    let conn = match db::init_db(&db_path) {
-        Ok(c) => Rc::new(c),
-        Err(e) => {
-            eprintln!("error opening database: {e}");
-            return;
-        }
-    };
-
-    let entries = match repository::list_entries_page(&conn, page_size, 0) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("error loading entries: {e}");
-            return;
-        }
-    };
-
-    let has_more = entries.len() >= page_size;
-    append_entries_to_store(&store, &entries, preview_chars, image_max_px);
-
-    // Pagination state
-    let offset = Rc::new(RefCell::new(entries.len()));
-    let all_loaded = Rc::new(RefCell::new(!has_more));
-    // Current search query (empty = unfiltered)
-    let search_query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
 
     let selection = SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(true);
@@ -112,31 +164,7 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     list_view.set_vexpand(true);
     list_view.set_show_separators(true);
 
-    // DB-side search: on search_changed, clear store and query DB
-    let store_for_search = store.clone();
-    let conn_for_search = conn.clone();
-    let offset_for_search = offset.clone();
-    let all_loaded_for_search = all_loaded.clone();
-    let search_query_for_search = search_query.clone();
-    search_entry.connect_search_changed(move |entry| {
-        let query = entry.text().to_string();
-        *search_query_for_search.borrow_mut() = query.clone();
-        store_for_search.remove_all();
-        *offset_for_search.borrow_mut() = 0;
-        *all_loaded_for_search.borrow_mut() = false;
-
-        let entries = if query.is_empty() {
-            repository::list_entries_page(&conn_for_search, page_size, 0).unwrap_or_default()
-        } else {
-            repository::search_entries_page(&conn_for_search, &query, page_size, 0)
-                .unwrap_or_default()
-        };
-        let has_more = entries.len() >= page_size;
-        *offset_for_search.borrow_mut() = entries.len();
-        *all_loaded_for_search.borrow_mut() = !has_more;
-        append_entries_to_store(&store_for_search, &entries, preview_chars, image_max_px);
-    });
-
+    setup_search(&search_entry, &state);
     search_entry.set_key_capture_widget(Some(&list_view));
 
     let scrolled = ScrolledWindow::new();
@@ -144,17 +172,31 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
     scrolled.set_vexpand(true);
     main_box.append(&scrolled);
 
-    // Scroll-to-load: load next page when scrolled past 80%
-    let store_for_scroll = store.clone();
-    let conn_for_scroll = conn.clone();
-    let offset_for_scroll = offset;
-    let all_loaded_for_scroll = all_loaded;
-    let search_query_for_scroll = search_query;
+    setup_scroll(&scrolled, &state);
+    setup_activate(&list_view, &state, &selection, &window);
+    setup_delete(&list_view, &state, &selection);
+    setup_escape(&window);
+
+    window.set_child(Some(&main_box));
+    window.present();
+    list_view.grab_focus();
+    if store.n_items() > 0 {
+        list_view.scroll_to(0, gtk4::ListScrollFlags::FOCUS, None::<gtk4::ScrollInfo>);
+    }
+}
+
+fn setup_search(search_entry: &SearchEntry, state: &Rc<WindowState>) {
+    let state = state.clone();
+    search_entry.connect_search_changed(move |entry| {
+        *state.search_query.borrow_mut() = entry.text().to_string();
+        state.reload();
+    });
+}
+
+fn setup_scroll(scrolled: &ScrolledWindow, state: &Rc<WindowState>) {
+    let state = state.clone();
     let vadj = scrolled.vadjustment();
     vadj.connect_value_changed(move |adj| {
-        if *all_loaded_for_scroll.borrow() {
-            return;
-        }
         let value = adj.value();
         let page = adj.page_size();
         let upper = adj.upper();
@@ -162,81 +204,64 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
             return;
         }
         let ratio = (value + page) / upper;
-        if ratio < 0.8 {
-            return;
+        if ratio >= 0.8 {
+            state.load_next_page();
         }
-
-        let current_offset = *offset_for_scroll.borrow();
-        let query = search_query_for_scroll.borrow().clone();
-        let entries = if query.is_empty() {
-            repository::list_entries_page(&conn_for_scroll, page_size, current_offset)
-                .unwrap_or_default()
-        } else {
-            repository::search_entries_page(&conn_for_scroll, &query, page_size, current_offset)
-                .unwrap_or_default()
-        };
-        let fetched = entries.len();
-        if fetched < page_size {
-            *all_loaded_for_scroll.borrow_mut() = true;
-        }
-        *offset_for_scroll.borrow_mut() = current_offset + fetched;
-        append_entries_to_store(&store_for_scroll, &entries, preview_chars, image_max_px);
     });
+}
 
-    // Handle Enter/click — select entry and set clipboard
-    let conn_for_activate = conn.clone();
-    let window_for_activate = window.clone();
-    let sel_for_activate = selection.clone();
+fn setup_activate(
+    list_view: &ListView,
+    state: &Rc<WindowState>,
+    selection: &SingleSelection,
+    window: &gtk4::ApplicationWindow,
+) {
+    let state = state.clone();
+    let sel = selection.clone();
+    let win = window.clone();
     list_view.connect_activate(move |_lv, position| {
-        let item = sel_for_activate.item(position);
+        let item = sel.item(position);
         if let Some(entry_obj) = item.and_then(|o| o.downcast::<EntryObject>().ok()) {
             let entry_id = entry_obj.id();
-            if let Ok(Some(entry)) = repository::get_entry_content(&conn_for_activate, entry_id) {
-                match entry.content_type {
-                    ContentType::Text => {
-                        if let Some(text) = &entry.text_content {
-                            let _ = crate::clipboard::write_clipboard_text(text);
+            if let Ok(Some(entry)) = repository::get_entry_content(&state.conn, entry_id) {
+                match &entry.content {
+                    EntryContent::Text(text) => {
+                        let _ = crate::clipboard::write_clipboard_text(text);
+                    }
+                    EntryContent::Image(blob) => {
+                        if let Ok(img) = image::load_from_memory(blob) {
+                            let rgba = img.to_rgba8();
+                            let (w, h) = rgba.dimensions();
+                            let _ =
+                                crate::clipboard::write_clipboard_image(rgba.as_raw(), w, h);
                         }
                     }
-                    ContentType::Image => {
-                        if let Some(blob) = &entry.blob_content {
-                            if let Ok(img) = image::load_from_memory(blob) {
-                                let rgba = img.to_rgba8();
-                                let (w, h) = rgba.dimensions();
-                                let _ = crate::clipboard::write_clipboard_image(
-                                    rgba.as_raw(),
-                                    w,
-                                    h,
-                                );
-                            }
-                        }
-                    }
-                    ContentType::Unknown => {}
                 }
-                let _ = repository::update_timestamp(&conn_for_activate, entry_id);
+                let _ = repository::update_timestamp(&state.conn, entry_id);
             }
-            window_for_activate.close();
+            win.close();
         }
     });
+}
 
-    // Handle Delete key — remove selected entry
-    let store_for_scroll_to = store.clone();
-    let store_for_delete = store;
-    let conn_for_delete = conn;
-    let sel_for_delete = selection;
-    let delete_controller = EventControllerKey::new();
-    delete_controller.connect_key_pressed(move |_, key, _, _| {
+fn setup_delete(
+    list_view: &ListView,
+    state: &Rc<WindowState>,
+    selection: &SingleSelection,
+) {
+    let state = state.clone();
+    let sel = selection.clone();
+    let controller = EventControllerKey::new();
+    controller.connect_key_pressed(move |_, key, _, _| {
         if key == gtk4::gdk::Key::Delete {
-            let selected = sel_for_delete.selected();
-            if let Some(obj) = sel_for_delete.selected_item() {
+            let selected = sel.selected();
+            if let Some(obj) = sel.selected_item() {
                 if let Ok(entry_obj) = obj.downcast::<EntryObject>() {
-                    let entry_id = entry_obj.id();
-                    let _ = repository::delete_entry(&conn_for_delete, entry_id);
-                    store_for_delete.remove(selected);
-                    // Select next item if available
-                    let new_n = sel_for_delete.n_items();
+                    let _ = repository::delete_entry(&state.conn, entry_obj.id());
+                    state.store.remove(selected);
+                    let new_n = sel.n_items();
                     if new_n > 0 && selected < new_n {
-                        sel_for_delete.set_selected(selected);
+                        sel.set_selected(selected);
                     }
                 }
             }
@@ -244,27 +269,21 @@ pub fn build_window(app: &gtk4::Application, config: &Config, db_path: PathBuf) 
         }
         glib::Propagation::Proceed
     });
-    list_view.add_controller(delete_controller);
+    list_view.add_controller(controller);
+}
 
-    // Handle Escape — close window (capture phase so SearchEntry doesn't intercept)
-    let window_for_escape = window.clone();
-    let escape_controller = EventControllerKey::new();
-    escape_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
-    escape_controller.connect_key_pressed(move |_, key, _, _| {
+fn setup_escape(window: &gtk4::ApplicationWindow) {
+    let win = window.clone();
+    let controller = EventControllerKey::new();
+    controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    controller.connect_key_pressed(move |_, key, _, _| {
         if key == gtk4::gdk::Key::Escape {
-            window_for_escape.close();
+            win.close();
             return glib::Propagation::Stop;
         }
         glib::Propagation::Proceed
     });
-    window.add_controller(escape_controller);
-
-    window.set_child(Some(&main_box));
-    window.present();
-    list_view.grab_focus();
-    if store_for_scroll_to.n_items() > 0 {
-        list_view.scroll_to(0, gtk4::ListScrollFlags::FOCUS, None::<gtk4::ScrollInfo>);
-    }
+    window.add_controller(controller);
 }
 
 #[cfg(test)]
@@ -294,7 +313,6 @@ mod tests {
 
     #[test]
     fn test_truncate_multibyte_utf8() {
-        // Each Cyrillic char is 1 char but 2 bytes
         let (result, truncated) = truncate_preview("Привет мир!", 6);
         assert_eq!(result, "Привет");
         assert!(truncated);
@@ -314,8 +332,6 @@ mod tests {
         assert!(!truncated);
     }
 
-    // compute_thumbnail_size tests
-
     #[test]
     fn test_thumbnail_small_image_no_scaling() {
         assert_eq!(compute_thumbnail_size(100, 80, 320), (100, 80));
@@ -328,25 +344,21 @@ mod tests {
 
     #[test]
     fn test_thumbnail_landscape() {
-        // 800x400, max 320 → scale 0.4 → 320x160
         assert_eq!(compute_thumbnail_size(800, 400, 320), (320, 160));
     }
 
     #[test]
     fn test_thumbnail_portrait() {
-        // 400x800, max 320 → scale 0.4 → 160x320
         assert_eq!(compute_thumbnail_size(400, 800, 320), (160, 320));
     }
 
     #[test]
     fn test_thumbnail_square_large() {
-        // 640x640, max 320 → scale 0.5 → 320x320
         assert_eq!(compute_thumbnail_size(640, 640, 320), (320, 320));
     }
 }
 
 /// Compute scaled thumbnail dimensions preserving aspect ratio.
-/// If both dimensions are within `max_px`, returns original size.
 pub fn compute_thumbnail_size(src_w: i32, src_h: i32, max_px: i32) -> (i32, i32) {
     if src_w <= max_px && src_h <= max_px {
         return (src_w, src_h);

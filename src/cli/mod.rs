@@ -1,5 +1,6 @@
 pub mod config;
 pub mod copy;
+#[cfg(feature = "ui")]
 pub mod history;
 pub mod show;
 pub mod watch;
@@ -28,6 +29,7 @@ pub enum Commands {
     /// Watch clipboard for changes
     Watch,
     /// Open history window
+    #[cfg(feature = "ui")]
     History,
     /// Configuration management
     Config {

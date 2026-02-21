@@ -12,7 +12,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 directories = "5"
-gtk4 = { version = "0.9", features = ["v4_12"] }
+gtk4 = { version = "0.9", features = ["v4_12"], optional = true }
 humantime-serde = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -20,6 +20,10 @@ rusqlite_migration = "1"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 thiserror = "2"
+
+[features]
+default = ["ui"]
+ui = ["dep:gtk4"]
 
 [profile.release]
 lto = true

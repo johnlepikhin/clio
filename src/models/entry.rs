@@ -20,7 +20,7 @@ impl ContentType {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_db_str(s: &str) -> Self {
         match s {
             "text" => Self::Text,
             "image" => Self::Image,
@@ -29,12 +29,47 @@ impl ContentType {
     }
 }
 
+/// Content payload of a clipboard entry.
+#[derive(Debug, Clone)]
+pub enum EntryContent {
+    Text(String),
+    Image(Vec<u8>), // PNG bytes
+}
+
+impl EntryContent {
+    pub fn content_type(&self) -> ContentType {
+        match self {
+            Self::Text(_) => ContentType::Text,
+            Self::Image(_) => ContentType::Image,
+        }
+    }
+
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn blob(&self) -> Option<&[u8]> {
+        match self {
+            Self::Image(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    pub fn size_bytes(&self) -> usize {
+        match self {
+            Self::Text(s) => s.len(),
+            Self::Image(b) => b.len(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ClipboardEntry {
     pub id: Option<i64>,
-    pub content_type: ContentType,
-    pub text_content: Option<String>,
-    pub blob_content: Option<Vec<u8>>,
+    pub content: EntryContent,
     pub content_hash: Vec<u8>,
     pub source_app: Option<String>,
     pub created_at: Option<String>,
@@ -46,9 +81,7 @@ impl ClipboardEntry {
         let hash = compute_hash(text.as_bytes());
         Self {
             id: None,
-            content_type: ContentType::Text,
-            text_content: Some(text),
-            blob_content: None,
+            content: EntryContent::Text(text),
             content_hash: hash,
             source_app,
             created_at: None,
@@ -66,9 +99,7 @@ impl ClipboardEntry {
         let hash = compute_hash(&png_bytes);
         Ok(Self {
             id: None,
-            content_type: ContentType::Image,
-            text_content: None,
-            blob_content: Some(png_bytes),
+            content: EntryContent::Image(png_bytes),
             content_hash: hash,
             source_app,
             created_at: None,
@@ -76,29 +107,8 @@ impl ClipboardEntry {
         })
     }
 
-    #[allow(dead_code)]
-    pub fn from_unknown(raw_bytes: Vec<u8>, source_app: Option<String>) -> Self {
-        let hash = compute_hash(&raw_bytes);
-        Self {
-            id: None,
-            content_type: ContentType::Unknown,
-            text_content: None,
-            blob_content: Some(raw_bytes),
-            content_hash: hash,
-            source_app,
-            created_at: None,
-            metadata: None,
-        }
-    }
-
     pub fn content_size_bytes(&self) -> usize {
-        if let Some(ref text) = self.text_content {
-            text.len()
-        } else if let Some(ref blob) = self.blob_content {
-            blob.len()
-        } else {
-            0
-        }
+        self.content.size_bytes()
     }
 }
 
@@ -141,9 +151,9 @@ mod tests {
     #[test]
     fn test_from_text() {
         let entry = ClipboardEntry::from_text("test".to_string(), None);
-        assert_eq!(entry.content_type, ContentType::Text);
-        assert_eq!(entry.text_content.as_deref(), Some("test"));
-        assert!(entry.blob_content.is_none());
+        assert_eq!(entry.content.content_type(), ContentType::Text);
+        assert_eq!(entry.content.text(), Some("test"));
+        assert!(entry.content.blob().is_none());
         assert_eq!(entry.content_hash.len(), 32);
     }
 
@@ -151,20 +161,18 @@ mod tests {
     fn test_from_image() {
         let rgba = vec![255u8; 4 * 2 * 2]; // 2x2 white image
         let entry = ClipboardEntry::from_image(2, 2, &rgba, None).unwrap();
-        assert_eq!(entry.content_type, ContentType::Image);
-        assert!(entry.text_content.is_none());
-        assert!(entry.blob_content.is_some());
-        // PNG bytes should start with PNG magic
-        let blob = entry.blob_content.as_ref().unwrap();
+        assert_eq!(entry.content.content_type(), ContentType::Image);
+        assert!(entry.content.text().is_none());
+        let blob = entry.content.blob().unwrap();
         assert_eq!(&blob[1..4], b"PNG");
     }
 
     #[test]
     fn test_content_type_roundtrip() {
-        assert_eq!(ContentType::from_str("text"), ContentType::Text);
-        assert_eq!(ContentType::from_str("image"), ContentType::Image);
-        assert_eq!(ContentType::from_str("unknown"), ContentType::Unknown);
-        assert_eq!(ContentType::from_str("other"), ContentType::Unknown);
+        assert_eq!(ContentType::from_db_str("text"), ContentType::Text);
+        assert_eq!(ContentType::from_db_str("image"), ContentType::Image);
+        assert_eq!(ContentType::from_db_str("unknown"), ContentType::Unknown);
+        assert_eq!(ContentType::from_db_str("other"), ContentType::Unknown);
     }
 
     #[test]

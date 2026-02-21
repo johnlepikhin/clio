@@ -1,9 +1,9 @@
 pub mod source_app;
 
-use arboard::{Clipboard, SetExtLinux};
+use arboard::Clipboard;
 
 #[cfg(target_os = "linux")]
-use arboard::{GetExtLinux, LinuxClipboardKind};
+use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
 
 use crate::errors::{AppError, Result};
 
@@ -18,17 +18,23 @@ pub enum ClipboardContent {
     Empty,
 }
 
+fn open_clipboard() -> Result<Clipboard> {
+    Clipboard::new().map_err(|e| AppError::Clipboard(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Read
+// ---------------------------------------------------------------------------
+
 #[cfg(target_os = "linux")]
 pub fn read_selection(kind: LinuxClipboardKind) -> Result<ClipboardContent> {
-    let mut cb = Clipboard::new().map_err(|e| AppError::Clipboard(e.to_string()))?;
+    let mut cb = open_clipboard()?;
 
-    // Try text first
     match cb.get().clipboard(kind).text() {
         Ok(text) if !text.is_empty() => return Ok(ClipboardContent::Text(text)),
         _ => {}
     }
 
-    // Try image (only for Clipboard selection, PRIMARY rarely has images)
     if matches!(kind, LinuxClipboardKind::Clipboard) {
         if let Ok(img) = cb.get().clipboard(kind).image() {
             return Ok(ClipboardContent::Image {
@@ -49,7 +55,7 @@ pub fn read_clipboard() -> Result<ClipboardContent> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let mut cb = Clipboard::new().map_err(|e| AppError::Clipboard(e.to_string()))?;
+        let mut cb = open_clipboard()?;
         match cb.get_text() {
             Ok(text) if !text.is_empty() => return Ok(ClipboardContent::Text(text)),
             _ => {}
@@ -64,6 +70,16 @@ pub fn read_clipboard() -> Result<ClipboardContent> {
         Ok(ClipboardContent::Empty)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Write (fire-and-forget)
+//
+// These functions spawn a background thread that calls `set().wait()`,
+// which on Wayland keeps serving the clipboard until another app copies.
+// Errors inside the thread are logged to stderr but NOT propagated to the
+// caller — the returned `Ok(())` only means the thread was spawned.
+// For short-lived processes (e.g. `clio copy`) use `write_clipboard_text_sync`.
+// ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
 pub fn write_selection_text(kind: LinuxClipboardKind, text: &str) -> Result<()> {
@@ -107,27 +123,6 @@ pub fn write_clipboard_text(text: &str) -> Result<()> {
     }
 }
 
-/// Write text to clipboard synchronously (blocks until clipboard is set).
-/// Use this for short-lived processes like `clio copy` that would exit
-/// before a background thread finishes.
-pub fn write_clipboard_text_sync(text: &str) -> Result<()> {
-    let mut cb = Clipboard::new().map_err(|e| AppError::Clipboard(e.to_string()))?;
-    #[cfg(target_os = "linux")]
-    {
-        cb.set()
-            .clipboard(LinuxClipboardKind::Clipboard)
-            .text(text.to_owned())
-            .map_err(|e| AppError::Clipboard(e.to_string()))?;
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        cb.set()
-            .text(text.to_owned())
-            .map_err(|e| AppError::Clipboard(e.to_string()))?;
-    }
-    Ok(())
-}
-
 pub fn write_clipboard_image(rgba: &[u8], width: u32, height: u32) -> Result<()> {
     let rgba = rgba.to_vec();
     std::thread::spawn(move || {
@@ -147,5 +142,27 @@ pub fn write_clipboard_image(rgba: &[u8], width: u32, height: u32) -> Result<()>
             eprintln!("clipboard error: {e}");
         }
     });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Write (synchronous) — for short-lived processes like `clio copy`.
+// ---------------------------------------------------------------------------
+
+pub fn write_clipboard_text_sync(text: &str) -> Result<()> {
+    let mut cb = open_clipboard()?;
+    #[cfg(target_os = "linux")]
+    {
+        cb.set()
+            .clipboard(LinuxClipboardKind::Clipboard)
+            .text(text.to_owned())
+            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cb.set()
+            .text(text.to_owned())
+            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+    }
     Ok(())
 }

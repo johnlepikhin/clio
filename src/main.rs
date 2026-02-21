@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod errors;
 mod models;
+#[cfg(feature = "ui")]
 mod ui;
 
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ fn main() -> anyhow::Result<()> {
             let conn = db::init_db(&db_path).context("failed to initialize database")?;
             cli::watch::run(&conn, &config)
         }
+        #[cfg(feature = "ui")]
         Commands::History => cli::history::run(&config, db_path).map_err(Into::into),
         Commands::Config { ref command } => {
             let config_path = cli

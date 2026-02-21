@@ -4,16 +4,16 @@ use chrono::{Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection};
 
 use crate::errors::{AppError, Result};
-use crate::models::entry::{ClipboardEntry, ContentType};
+use crate::models::entry::{ClipboardEntry, ContentType, EntryContent};
 
 pub fn insert_entry(conn: &Connection, entry: &ClipboardEntry) -> Result<i64> {
     conn.execute(
         "INSERT INTO clipboard_entries (content_type, text_content, blob_content, content_hash, source_app, metadata)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
-            entry.content_type.as_str(),
-            entry.text_content,
-            entry.blob_content,
+            entry.content.content_type().as_str(),
+            entry.content.text(),
+            entry.content.blob(),
             entry.content_hash,
             entry.source_app,
             entry.metadata.as_deref().unwrap_or("{}"),
@@ -42,18 +42,14 @@ pub fn update_timestamp(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn list_entries(conn: &Connection, limit: usize) -> Result<Vec<ClipboardEntry>> {
     let mut stmt = conn.prepare(
         "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata
          FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit as i64], row_to_entry)?;
-    let mut entries = Vec::new();
-    for row in rows {
-        entries.push(row?);
-    }
-    Ok(entries)
+    collect_entries(rows)
 }
 
 pub fn list_entries_page(
@@ -66,11 +62,7 @@ pub fn list_entries_page(
          FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt.query_map(params![limit as i64, offset as i64], row_to_entry)?;
-    let mut entries = Vec::new();
-    for row in rows {
-        entries.push(row?);
-    }
-    Ok(entries)
+    collect_entries(rows)
 }
 
 pub fn search_entries_page(
@@ -88,11 +80,7 @@ pub fn search_entries_page(
          ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
     )?;
     let rows = stmt.query_map(params![pattern, limit as i64, offset as i64], row_to_entry)?;
-    let mut entries = Vec::new();
-    for row in rows {
-        entries.push(row?);
-    }
-    Ok(entries)
+    collect_entries(rows)
 }
 
 pub fn delete_entry(conn: &Connection, id: i64) -> Result<()> {
@@ -151,6 +139,9 @@ pub fn save_or_update(
     max_history: usize,
     max_age: Option<Duration>,
 ) -> Result<i64> {
+    // Always prune expired entries, regardless of dedup outcome
+    prune_expired(conn, max_age)?;
+
     if let Some(existing) = find_by_hash(conn, &entry.content_hash)? {
         let id = existing
             .id
@@ -160,17 +151,33 @@ pub fn save_or_update(
     }
     let id = insert_entry(conn, entry)?;
     prune_oldest(conn, max_history)?;
-    prune_expired(conn, max_age)?;
     Ok(id)
+}
+
+fn collect_entries(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<ClipboardEntry>>,
+) -> Result<Vec<ClipboardEntry>> {
+    let mut entries = Vec::new();
+    for row in rows {
+        entries.push(row?);
+    }
+    Ok(entries)
 }
 
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClipboardEntry> {
     let ct_str: String = row.get(1)?;
+    let text_content: Option<String> = row.get(2)?;
+    let blob_content: Option<Vec<u8>> = row.get(3)?;
+
+    let content = match ContentType::from_db_str(&ct_str) {
+        ContentType::Text => EntryContent::Text(text_content.unwrap_or_default()),
+        ContentType::Image => EntryContent::Image(blob_content.unwrap_or_default()),
+        ContentType::Unknown => EntryContent::Text(text_content.unwrap_or_default()),
+    };
+
     Ok(ClipboardEntry {
         id: Some(row.get(0)?),
-        content_type: ContentType::from_str(&ct_str),
-        text_content: row.get(2)?,
-        blob_content: row.get(3)?,
+        content,
         content_hash: row.get(4)?,
         source_app: row.get(5)?,
         created_at: row.get(6)?,
@@ -197,7 +204,7 @@ mod tests {
         let found = find_by_hash(&conn, &entry.content_hash).unwrap();
         assert!(found.is_some());
         let found = found.unwrap();
-        assert_eq!(found.text_content.as_deref(), Some("hello"));
+        assert_eq!(found.content.text(), Some("hello"));
     }
 
     #[test]
@@ -236,8 +243,8 @@ mod tests {
 
         let entries = list_entries(&conn, 500).unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].text_content.as_deref(), Some("b"));
-        assert_eq!(entries[1].text_content.as_deref(), Some("a"));
+        assert_eq!(entries[0].content.text(), Some("b"));
+        assert_eq!(entries[1].content.text(), Some("a"));
     }
 
     #[test]
@@ -288,7 +295,7 @@ mod tests {
 
         let found = get_entry_content(&conn, id).unwrap();
         assert!(found.is_some());
-        assert_eq!(found.unwrap().text_content.as_deref(), Some("content"));
+        assert_eq!(found.unwrap().content.text(), Some("content"));
 
         let not_found = get_entry_content(&conn, 9999).unwrap();
         assert!(not_found.is_none());
@@ -303,22 +310,18 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        // First page
         let page1 = list_entries_page(&conn, 3, 0).unwrap();
         assert_eq!(page1.len(), 3);
 
-        // Second page
         let page2 = list_entries_page(&conn, 3, 3).unwrap();
         assert_eq!(page2.len(), 3);
 
-        // Pages should not overlap
         let ids1: Vec<_> = page1.iter().map(|e| e.id).collect();
         let ids2: Vec<_> = page2.iter().map(|e| e.id).collect();
         for id in &ids1 {
             assert!(!ids2.contains(id));
         }
 
-        // Beyond all entries
         let empty = list_entries_page(&conn, 3, 100).unwrap();
         assert!(empty.is_empty());
     }
@@ -335,17 +338,14 @@ mod tests {
             insert_entry(&conn, &entry).unwrap();
         }
 
-        // Search matching
         let results = search_entries_page(&conn, "apple", 10, 0).unwrap();
         assert_eq!(results.len(), 5);
 
-        // Search with pagination
         let page1 = search_entries_page(&conn, "apple", 2, 0).unwrap();
         assert_eq!(page1.len(), 2);
         let page2 = search_entries_page(&conn, "apple", 2, 2).unwrap();
         assert_eq!(page2.len(), 2);
 
-        // Search not matching
         let none = search_entries_page(&conn, "cherry", 10, 0).unwrap();
         assert!(none.is_empty());
     }
@@ -367,7 +367,6 @@ mod tests {
     fn test_prune_expired_deletes_old_entries() {
         let conn = setup();
 
-        // Insert a backdated entry (2 hours ago)
         conn.execute(
             "INSERT INTO clipboard_entries (content_type, text_content, content_hash, created_at)
              VALUES ('text', 'old', X'00', strftime('%Y-%m-%dT%H:%M:%f', 'now', '-2 hours'))",
@@ -375,19 +374,17 @@ mod tests {
         )
         .unwrap();
 
-        // Insert a fresh entry
         let fresh = ClipboardEntry::from_text("fresh".to_string(), None);
         insert_entry(&conn, &fresh).unwrap();
 
         let entries = list_entries(&conn, 100).unwrap();
         assert_eq!(entries.len(), 2);
 
-        // Prune entries older than 1 hour
         let deleted = prune_expired(&conn, Some(Duration::from_secs(3600))).unwrap();
         assert_eq!(deleted, 1);
 
         let entries = list_entries(&conn, 100).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].text_content.as_deref(), Some("fresh"));
+        assert_eq!(entries[0].content.text(), Some("fresh"));
     }
 }

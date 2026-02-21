@@ -10,5 +10,6 @@ Thumbs.db
 *.tmp
 *.swp
 .vscode/
+.aim/
 mcp_debug.log
 TODO.org
