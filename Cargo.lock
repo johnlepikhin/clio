@@ -325,6 +325,7 @@ dependencies = [
  "ctrlc",
  "directories",
  "gtk4",
+ "humantime",
  "humantime-serde",
  "image",
  "regex",

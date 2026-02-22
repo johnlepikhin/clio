@@ -6,6 +6,7 @@ pub mod show;
 pub mod watch;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
@@ -25,7 +26,11 @@ pub enum Commands {
     /// Show current clipboard content
     Show,
     /// Copy stdin to clipboard
-    Copy,
+    Copy {
+        /// Entry time-to-live (e.g. "30s", "5m", "1h")
+        #[arg(long, value_parser = parse_duration)]
+        ttl: Option<Duration>,
+    },
     /// Watch clipboard for changes
     Watch,
     /// Open history window
@@ -59,4 +64,8 @@ pub enum ConfigCommands {
     Validate,
     /// Print configuration file path
     Path,
+}
+
+fn parse_duration(s: &str) -> Result<Duration, humantime::DurationError> {
+    humantime::parse_duration(s)
 }
