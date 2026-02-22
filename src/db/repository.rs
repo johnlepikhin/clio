@@ -47,6 +47,25 @@ pub fn update_timestamp_and_expiry(
     Ok(())
 }
 
+/// Update entry on dedup: refresh timestamp, COALESCE expires_at and source_app.
+/// None means "keep existing value", Some means "overwrite".
+fn update_on_dedup(
+    conn: &Connection,
+    id: i64,
+    expires_at: Option<&str>,
+    source_app: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE clipboard_entries
+         SET created_at = strftime('%Y-%m-%dT%H:%M:%f', 'now'),
+             expires_at = COALESCE(?2, expires_at),
+             source_app = COALESCE(?3, source_app)
+         WHERE id = ?1",
+        params![id, expires_at, source_app],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub fn list_entries(conn: &Connection, limit: usize) -> Result<Vec<ClipboardEntry>> {
     let mut stmt = conn.prepare_cached(
@@ -177,7 +196,7 @@ pub fn save_or_update(
         let id = existing
             .id
             .ok_or(AppError::Database(rusqlite::Error::QueryReturnedNoRows))?;
-        update_timestamp_and_expiry(conn, id, entry.expires_at.as_deref())?;
+        update_on_dedup(conn, id, entry.expires_at.as_deref(), entry.source_app.as_deref())?;
         return Ok(id);
     }
     let id = insert_entry(conn, entry)?;
@@ -504,6 +523,29 @@ mod tests {
     }
 
     #[test]
+    fn test_save_or_update_preserves_existing_expires_at_on_dedup() {
+        let conn = setup();
+
+        // First save with TTL
+        let mut entry1 = ClipboardEntry::from_text("hello".to_string(), None);
+        entry1.expires_at = Some("2099-01-01T00:00:00.000".to_string());
+        let id1 = save_or_update(&conn, &entry1, 500, None).unwrap();
+
+        let found1 = get_entry_content(&conn, id1).unwrap().unwrap();
+        assert_eq!(found1.expires_at.as_deref(), Some("2099-01-01T00:00:00.000"));
+
+        // Same content without TTL (simulates daemon dedup)
+        let entry2 = ClipboardEntry::from_text("hello".to_string(), None);
+        assert!(entry2.expires_at.is_none());
+        let id2 = save_or_update(&conn, &entry2, 500, None).unwrap();
+
+        assert_eq!(id1, id2);
+        // Existing TTL must be preserved
+        let found2 = get_entry_content(&conn, id2).unwrap().unwrap();
+        assert_eq!(found2.expires_at.as_deref(), Some("2099-01-01T00:00:00.000"));
+    }
+
+    #[test]
     fn test_get_latest_active_returns_active_entry() {
         let conn = setup();
         let entry = ClipboardEntry::from_text("active".to_string(), None);
@@ -542,5 +584,44 @@ mod tests {
 
         let result = get_latest_active(&conn).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_dedup_updates_source_app() {
+        let conn = setup();
+
+        let entry1 = ClipboardEntry::from_text("hello".to_string(), Some("Firefox".to_string()));
+        let id1 = save_or_update(&conn, &entry1, 500, None).unwrap();
+
+        let found1 = get_entry_content(&conn, id1).unwrap().unwrap();
+        assert_eq!(found1.source_app.as_deref(), Some("Firefox"));
+
+        // Same content from a different app
+        let entry2 = ClipboardEntry::from_text("hello".to_string(), Some("Chrome".to_string()));
+        let id2 = save_or_update(&conn, &entry2, 500, None).unwrap();
+
+        assert_eq!(id1, id2);
+        let found2 = get_entry_content(&conn, id2).unwrap().unwrap();
+        assert_eq!(found2.source_app.as_deref(), Some("Chrome"));
+    }
+
+    #[test]
+    fn test_dedup_preserves_source_app_when_new_is_none() {
+        let conn = setup();
+
+        let entry1 = ClipboardEntry::from_text("hello".to_string(), Some("Firefox".to_string()));
+        let id1 = save_or_update(&conn, &entry1, 500, None).unwrap();
+
+        let found1 = get_entry_content(&conn, id1).unwrap().unwrap();
+        assert_eq!(found1.source_app.as_deref(), Some("Firefox"));
+
+        // Same content, no source_app detected
+        let entry2 = ClipboardEntry::from_text("hello".to_string(), None);
+        let id2 = save_or_update(&conn, &entry2, 500, None).unwrap();
+
+        assert_eq!(id1, id2);
+        // Existing source_app must be preserved
+        let found2 = get_entry_content(&conn, id2).unwrap().unwrap();
+        assert_eq!(found2.source_app.as_deref(), Some("Firefox"));
     }
 }
