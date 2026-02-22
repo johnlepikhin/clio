@@ -20,6 +20,7 @@ ctrlc = "3"
 directories = "5"
 gtk4 = { version = "0.9", features = ["v4_12"], optional = true }
 humantime = "2"
+libc = "0.2"
 humantime-serde = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 regex = "1"

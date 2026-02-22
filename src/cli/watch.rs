@@ -17,6 +17,29 @@ use crate::config::{CompiledRule, Config, SyncMode};
 use crate::db::repository;
 use crate::models::entry::{compute_hash, ClipboardEntry, ContentHash, EntryContent};
 
+/// Ask glibc to return free heap pages to the OS.
+/// Cost: ~1μs per call. Prevents RSS growth from transient allocations.
+#[cfg(target_os = "linux")]
+fn trim_heap() {
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+/// Limit glibc malloc arenas to avoid VSZ bloat from per-thread arenas.
+/// Each arena reserves ~64MB of virtual address space (PROT_NONE, no RSS cost)
+/// but inflates VSZ. With 2 arenas (main + 1 worker) VSZ stays bounded.
+#[cfg(target_os = "linux")]
+fn limit_malloc_arenas() {
+    unsafe {
+        // M_ARENA_MAX = -8
+        libc::mallopt(-8, 2);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn trim_heap() {}
+
 /// Shared state for the watch loop.
 struct WatchState<'a> {
     conn: &'a Connection,
@@ -128,6 +151,26 @@ impl WatchState<'_> {
         }
     }
 
+    /// Process a change and optionally extract text for syncing (avoids an extra clone).
+    /// When `need_sync` is true and the entry is text, returns the text by move.
+    fn process_change_with_sync(
+        &self,
+        content: ClipboardContent,
+        need_sync: bool,
+    ) -> Option<String> {
+        if let Some(mut entry) = self.build_entry(content) {
+            let ttl = self.apply_actions(&mut entry);
+            self.save_if_fits(&entry);
+            self.update_expiry_tracking(ttl, &entry.content_hash);
+            if need_sync {
+                if let EntryContent::Text(t) = entry.content {
+                    return Some(t);
+                }
+            }
+        }
+        None
+    }
+
     /// Check if the current TTL entry has expired and restore the previous entry.
     /// Returns Some if clipboard was updated (hash + optional text for primary sync).
     fn check_expiry_and_restore(&self) -> Option<RestoreResult> {
@@ -214,16 +257,11 @@ impl WatchState<'_> {
             return SelectionResult { hash: *last_hash, sync_text: None };
         }
 
-        // Extract text for syncing before consuming content
-        let sync_text = if should_sync {
-            content.as_ref().and_then(content_text).map(str::to_owned)
+        let sync_text = if let Some(content) = content {
+            self.process_change_with_sync(content, should_sync)
         } else {
             None
         };
-
-        if let Some(content) = content {
-            self.process_change(content);
-        }
 
         SelectionResult { hash, sync_text }
     }
@@ -243,21 +281,8 @@ impl WatchState<'_> {
             return SelectionResult { hash: *last_hash, sync_text: None };
         }
 
-        if let Some(text) = content.as_ref().and_then(content_text) {
-            let mut entry = ClipboardEntry::from_text(
-                text.to_owned(),
-                source_app::detect_source_app(),
-            );
-            let ttl = self.apply_actions(&mut entry);
-            self.save_if_fits(&entry);
-
-            if should_sync {
-                self.update_expiry_tracking(ttl, &entry.content_hash);
-            }
-        }
-
-        let sync_text = if should_sync {
-            content.as_ref().and_then(content_text).map(str::to_owned)
+        let sync_text = if let Some(content) = content {
+            self.process_change_with_sync(content, should_sync)
         } else {
             None
         };
@@ -275,15 +300,10 @@ fn content_hash(content: &ClipboardContent) -> Option<ContentHash> {
     }
 }
 
-/// Extract text from clipboard content for syncing.
-fn content_text(content: &ClipboardContent) -> Option<&str> {
-    match content {
-        ClipboardContent::Text(t) => Some(t.as_str()),
-        _ => None,
-    }
-}
-
 pub fn run(conn: &Connection, config: &Config) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    limit_malloc_arenas();
+
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
@@ -358,6 +378,8 @@ fn run_disabled(
 
         state.process_change(content);
         last_hash = Some(hash);
+
+        trim_heap();
     }
 
     Ok(())
@@ -373,6 +395,8 @@ fn run_sync(
 ) -> anyhow::Result<()> {
     let mut last_clipboard_hash: Option<ContentHash> = None;
     let mut last_primary_hash: Option<ContentHash> = None;
+    let mut primary_handle: Option<std::thread::JoinHandle<()>> = None;
+    let mut clipboard_handle: Option<std::thread::JoinHandle<()>> = None;
 
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(interval);
@@ -381,10 +405,14 @@ fn run_sync(
         if let Some(result) = state.check_expiry_and_restore() {
             last_clipboard_hash = Some(result.clipboard_hash);
             if matches!(sync_mode, SyncMode::Both | SyncMode::ToPrimary) {
-                let _ = clipboard::write_selection_text(
+                let new_handle = clipboard::write_selection_text(
                     LinuxClipboardKind::Primary,
                     &result.restored_text,
                 );
+                if let Some(old) = primary_handle.take() {
+                    let _ = old.join();
+                }
+                primary_handle = new_handle;
                 last_primary_hash = Some(compute_hash(result.restored_text.as_bytes()));
             }
         }
@@ -393,19 +421,37 @@ fn run_sync(
         let sync_to_primary = matches!(sync_mode, SyncMode::Both | SyncMode::ToPrimary);
         let cb = state.poll_clipboard(&last_clipboard_hash, sync_to_primary);
         last_clipboard_hash = cb.hash;
-        if let Some(text) = cb.sync_text {
-            let _ = clipboard::write_selection_text(LinuxClipboardKind::Primary, &text);
+        let synced_to_primary = if let Some(text) = cb.sync_text {
+            let new_handle =
+                clipboard::write_selection_text(LinuxClipboardKind::Primary, &text);
+            if let Some(old) = primary_handle.take() {
+                let _ = old.join();
+            }
+            primary_handle = new_handle;
             last_primary_hash = Some(compute_hash(text.as_bytes()));
+            true
+        } else {
+            false
+        };
+
+        // Skip PRIMARY poll if we just synced text to it — we'd read back
+        // the same content we wrote, wasting an allocation.
+        if !synced_to_primary {
+            let sync_to_clipboard = matches!(sync_mode, SyncMode::Both | SyncMode::ToClipboard);
+            let pr = state.poll_primary(&last_primary_hash, sync_to_clipboard);
+            last_primary_hash = pr.hash;
+            if let Some(text) = pr.sync_text {
+                let new_handle =
+                    clipboard::write_selection_text(LinuxClipboardKind::Clipboard, &text);
+                if let Some(old) = clipboard_handle.take() {
+                    let _ = old.join();
+                }
+                clipboard_handle = new_handle;
+                last_clipboard_hash = Some(compute_hash(text.as_bytes()));
+            }
         }
 
-        // Process PRIMARY; its buffer is freed after this block.
-        let sync_to_clipboard = matches!(sync_mode, SyncMode::Both | SyncMode::ToClipboard);
-        let pr = state.poll_primary(&last_primary_hash, sync_to_clipboard);
-        last_primary_hash = pr.hash;
-        if let Some(text) = pr.sync_text {
-            let _ = clipboard::write_selection_text(LinuxClipboardKind::Clipboard, &text);
-            last_clipboard_hash = Some(compute_hash(text.as_bytes()));
-        }
+        trim_heap();
     }
 
     Ok(())

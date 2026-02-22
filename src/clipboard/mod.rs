@@ -78,21 +78,26 @@ pub fn read_clipboard() -> Result<ClipboardContent> {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
-pub fn write_selection_text(kind: LinuxClipboardKind, text: &str) -> Result<()> {
+pub fn write_selection_text(
+    kind: LinuxClipboardKind,
+    text: &str,
+) -> Option<std::thread::JoinHandle<()>> {
     let text = text.to_owned();
-    std::thread::spawn(move || {
-        let mut cb = match Clipboard::new() {
-            Ok(cb) => cb,
-            Err(e) => {
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(move || {
+            let mut cb = match Clipboard::new() {
+                Ok(cb) => cb,
+                Err(e) => {
+                    eprintln!("clipboard error: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = cb.set().wait().clipboard(kind).text(text) {
                 eprintln!("clipboard error: {e}");
-                return;
             }
-        };
-        if let Err(e) = cb.set().wait().clipboard(kind).text(text) {
-            eprintln!("clipboard error: {e}");
-        }
-    });
-    Ok(())
+        })
+        .ok()
 }
 
 // ---------------------------------------------------------------------------

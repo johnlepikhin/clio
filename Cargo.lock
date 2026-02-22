@@ -328,6 +328,7 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "image",
+ "libc",
  "regex",
  "rusqlite",
  "rusqlite_migration",
