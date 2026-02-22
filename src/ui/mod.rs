@@ -13,6 +13,21 @@ use crate::config::Config;
 use crate::errors::Result;
 
 pub fn run_history_window(config: &Config, db_path: PathBuf) -> Result<()> {
+    // Skip Vulkan/NGL GPU initialization — Cairo is sufficient for a simple list UI
+    // and avoids ~2s of shader compilation + compositor round-trips.
+    // Disable AT-SPI accessibility bus — saves ~600ms of D-Bus setup.
+    // Users can override by setting these env vars before launching clio.
+    //
+    // SAFETY: called before any threads are spawned (pre-GTK init).
+    unsafe {
+        if std::env::var_os("GSK_RENDERER").is_none() {
+            std::env::set_var("GSK_RENDERER", "cairo");
+        }
+        if std::env::var_os("GTK_A11Y").is_none() {
+            std::env::set_var("GTK_A11Y", "none");
+        }
+    }
+
     let app = gtk4::Application::builder()
         .application_id("com.clio.history")
         .build();
