@@ -15,7 +15,7 @@ use crate::clipboard::source_app;
 use crate::clipboard::{self, ClipboardContent};
 use crate::config::{CompiledRule, Config, SyncMode};
 use crate::db::repository;
-use crate::models::entry::{compute_hash, ClipboardEntry, EntryContent};
+use crate::models::entry::{compute_hash, ClipboardEntry, ContentHash, EntryContent};
 
 /// Shared state for the watch loop.
 struct WatchState<'a> {
@@ -30,7 +30,7 @@ struct WatchState<'a> {
     /// When the current clipboard entry's TTL expires (None = no TTL).
     current_expiry: Cell<Option<Instant>>,
     /// Content hash of the current entry with TTL (to check if user changed clipboard).
-    current_expiry_hash: RefCell<Option<Vec<u8>>>,
+    current_expiry_hash: RefCell<Option<ContentHash>>,
 }
 
 impl WatchState<'_> {
@@ -49,16 +49,27 @@ impl WatchState<'_> {
     }
 
     /// Build a ClipboardEntry from content, or None if empty.
-    fn build_entry(content: &ClipboardContent) -> Option<ClipboardEntry> {
+    /// Rejects oversized images early (before PNG encoding) based on RGBA size.
+    fn build_entry(&self, content: ClipboardContent) -> Option<ClipboardEntry> {
         match content {
             ClipboardContent::Text(t) => {
-                Some(ClipboardEntry::from_text(t.clone(), source_app::detect_source_app()))
+                Some(ClipboardEntry::from_text(t, source_app::detect_source_app()))
             }
             ClipboardContent::Image {
                 width,
                 height,
                 rgba_bytes,
-            } => ClipboardEntry::from_image(*width, *height, rgba_bytes, source_app::detect_source_app()).ok(),
+            } => {
+                if rgba_bytes.len() as u64 > self.max_size {
+                    eprintln!(
+                        "skipping image: RGBA size {} KB exceeds limit {} KB",
+                        rgba_bytes.len() / 1024,
+                        self.max_size / 1024
+                    );
+                    return None;
+                }
+                ClipboardEntry::from_image(width, height, rgba_bytes, source_app::detect_source_app()).ok()
+            }
             ClipboardContent::Empty => None,
         }
     }
@@ -98,10 +109,10 @@ impl WatchState<'_> {
     }
 
     /// Update expiry tracking state after processing an entry.
-    fn update_expiry_tracking(&self, ttl: Option<Duration>, content_hash: &[u8]) {
+    fn update_expiry_tracking(&self, ttl: Option<Duration>, content_hash: &ContentHash) {
         if let Some(d) = ttl {
             self.current_expiry.set(Some(Instant::now() + d));
-            *self.current_expiry_hash.borrow_mut() = Some(content_hash.to_vec());
+            *self.current_expiry_hash.borrow_mut() = Some(*content_hash);
         } else {
             self.current_expiry.set(None);
             *self.current_expiry_hash.borrow_mut() = None;
@@ -109,8 +120,8 @@ impl WatchState<'_> {
     }
 
     /// Process a clipboard content change: build entry, apply actions, and save.
-    fn process_change(&self, content: &ClipboardContent) {
-        if let Some(mut entry) = Self::build_entry(content) {
+    fn process_change(&self, content: ClipboardContent) {
+        if let Some(mut entry) = self.build_entry(content) {
             let ttl = self.apply_actions(&mut entry);
             self.save_if_fits(&entry);
             self.update_expiry_tracking(ttl, &entry.content_hash);
@@ -153,7 +164,7 @@ impl WatchState<'_> {
                 if let Some(text) = entry.content.text() {
                     let _ = clipboard::write_clipboard_text_sync(text);
                     return Some(RestoreResult {
-                        clipboard_hash: entry.content_hash.clone(),
+                        clipboard_hash: entry.content_hash,
                         restored_text: text.to_owned(),
                     });
                 }
@@ -175,12 +186,88 @@ impl WatchState<'_> {
 }
 
 struct RestoreResult {
-    clipboard_hash: Vec<u8>,
+    clipboard_hash: ContentHash,
     restored_text: String,
 }
 
+/// Result of processing a single selection (CLIPBOARD or PRIMARY).
+#[cfg(target_os = "linux")]
+struct SelectionResult {
+    hash: Option<ContentHash>,
+    /// Text to sync to the other selection, if applicable.
+    sync_text: Option<String>,
+}
+
+impl WatchState<'_> {
+    /// Read a selection, process if changed, return new hash and optional sync text.
+    #[cfg(target_os = "linux")]
+    fn poll_clipboard(
+        &self,
+        last_hash: &Option<ContentHash>,
+        should_sync: bool,
+    ) -> SelectionResult {
+        let content = clipboard::read_selection(LinuxClipboardKind::Clipboard).ok();
+        let hash = content.as_ref().and_then(content_hash);
+        let changed = hash.as_ref().is_some_and(|h| last_hash.as_ref() != Some(h));
+
+        if !changed {
+            return SelectionResult { hash: *last_hash, sync_text: None };
+        }
+
+        // Extract text for syncing before consuming content
+        let sync_text = if should_sync {
+            content.as_ref().and_then(content_text).map(str::to_owned)
+        } else {
+            None
+        };
+
+        if let Some(content) = content {
+            self.process_change(content);
+        }
+
+        SelectionResult { hash, sync_text }
+    }
+
+    /// Read PRIMARY, process text if changed, return new hash and optional sync text.
+    #[cfg(target_os = "linux")]
+    fn poll_primary(
+        &self,
+        last_hash: &Option<ContentHash>,
+        should_sync: bool,
+    ) -> SelectionResult {
+        let content = clipboard::read_selection(LinuxClipboardKind::Primary).ok();
+        let hash = content.as_ref().and_then(content_hash);
+        let changed = hash.as_ref().is_some_and(|h| last_hash.as_ref() != Some(h));
+
+        if !changed {
+            return SelectionResult { hash: *last_hash, sync_text: None };
+        }
+
+        if let Some(text) = content.as_ref().and_then(content_text) {
+            let mut entry = ClipboardEntry::from_text(
+                text.to_owned(),
+                source_app::detect_source_app(),
+            );
+            let ttl = self.apply_actions(&mut entry);
+            self.save_if_fits(&entry);
+
+            if should_sync {
+                self.update_expiry_tracking(ttl, &entry.content_hash);
+            }
+        }
+
+        let sync_text = if should_sync {
+            content.as_ref().and_then(content_text).map(str::to_owned)
+        } else {
+            None
+        };
+
+        SelectionResult { hash, sync_text }
+    }
+}
+
 /// Compute hash for clipboard content, or None if empty.
-fn content_hash(content: &ClipboardContent) -> Option<Vec<u8>> {
+fn content_hash(content: &ClipboardContent) -> Option<ContentHash> {
     match content {
         ClipboardContent::Text(t) => Some(compute_hash(t.as_bytes())),
         ClipboardContent::Image { rgba_bytes, .. } => Some(compute_hash(rgba_bytes)),
@@ -245,7 +332,7 @@ fn run_disabled(
     running: &Arc<AtomicBool>,
     interval: Duration,
 ) -> anyhow::Result<()> {
-    let mut last_hash: Option<Vec<u8>> = None;
+    let mut last_hash: Option<ContentHash> = None;
 
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(interval);
@@ -269,7 +356,7 @@ fn run_disabled(
             continue;
         }
 
-        state.process_change(&content);
+        state.process_change(content);
         last_hash = Some(hash);
     }
 
@@ -284,8 +371,8 @@ fn run_sync(
     interval: Duration,
     sync_mode: SyncMode,
 ) -> anyhow::Result<()> {
-    let mut last_clipboard_hash: Option<Vec<u8>> = None;
-    let mut last_primary_hash: Option<Vec<u8>> = None;
+    let mut last_clipboard_hash: Option<ContentHash> = None;
+    let mut last_primary_hash: Option<ContentHash> = None;
 
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(interval);
@@ -302,55 +389,22 @@ fn run_sync(
             }
         }
 
-        let cb_content = clipboard::read_selection(LinuxClipboardKind::Clipboard).ok();
-        let pr_content = clipboard::read_selection(LinuxClipboardKind::Primary).ok();
-
-        let cb_hash = cb_content.as_ref().and_then(content_hash);
-        let pr_hash = pr_content.as_ref().and_then(content_hash);
-
-        let cb_changed = cb_hash.as_ref().is_some_and(|h| last_clipboard_hash.as_ref() != Some(h));
-        let pr_changed = pr_hash.as_ref().is_some_and(|h| last_primary_hash.as_ref() != Some(h));
-
-        if cb_changed {
-            if let Some(ref content) = cb_content {
-                state.process_change(content);
-            }
-
-            last_clipboard_hash = cb_hash.clone();
-
-            if matches!(sync_mode, SyncMode::Both | SyncMode::ToPrimary) {
-                if let Some(text) = cb_content.as_ref().and_then(content_text) {
-                    let _ = clipboard::write_selection_text(LinuxClipboardKind::Primary, text);
-                    last_primary_hash = Some(compute_hash(text.as_bytes()));
-                }
-            }
+        // Process CLIPBOARD first; its buffer is freed before PRIMARY read.
+        let sync_to_primary = matches!(sync_mode, SyncMode::Both | SyncMode::ToPrimary);
+        let cb = state.poll_clipboard(&last_clipboard_hash, sync_to_primary);
+        last_clipboard_hash = cb.hash;
+        if let Some(text) = cb.sync_text {
+            let _ = clipboard::write_selection_text(LinuxClipboardKind::Primary, &text);
+            last_primary_hash = Some(compute_hash(text.as_bytes()));
         }
 
-        if pr_changed {
-            if let Some(ref content) = pr_content {
-                if let Some(text) = content_text(content) {
-                    let mut entry = ClipboardEntry::from_text(
-                        text.to_owned(),
-                        source_app::detect_source_app(),
-                    );
-                    let ttl = state.apply_actions(&mut entry);
-                    state.save_if_fits(&entry);
-
-                    // Track TTL for primary entries synced to clipboard
-                    if matches!(sync_mode, SyncMode::Both | SyncMode::ToClipboard) {
-                        state.update_expiry_tracking(ttl, &entry.content_hash);
-                    }
-                }
-            }
-
-            last_primary_hash = pr_hash;
-
-            if matches!(sync_mode, SyncMode::Both | SyncMode::ToClipboard) {
-                if let Some(text) = pr_content.as_ref().and_then(content_text) {
-                    let _ = clipboard::write_selection_text(LinuxClipboardKind::Clipboard, text);
-                    last_clipboard_hash = Some(compute_hash(text.as_bytes()));
-                }
-            }
+        // Process PRIMARY; its buffer is freed after this block.
+        let sync_to_clipboard = matches!(sync_mode, SyncMode::Both | SyncMode::ToClipboard);
+        let pr = state.poll_primary(&last_primary_hash, sync_to_clipboard);
+        last_primary_hash = pr.hash;
+        if let Some(text) = pr.sync_text {
+            let _ = clipboard::write_selection_text(LinuxClipboardKind::Clipboard, &text);
+            last_clipboard_hash = Some(compute_hash(text.as_bytes()));
         }
     }
 

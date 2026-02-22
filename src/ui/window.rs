@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -11,7 +12,7 @@ use rusqlite::Connection;
 use crate::config::Config;
 use crate::db;
 use crate::db::repository;
-use crate::models::entry::{ClipboardEntry, EntryContent};
+use crate::models::entry::{ClipboardEntry, ContentHash, EntryContent};
 
 use super::entry_object::EntryObject;
 use super::entry_row;
@@ -36,6 +37,8 @@ struct WindowState {
     page_size: usize,
     preview_chars: usize,
     image_max_px: i32,
+    /// Cache of decoded thumbnail textures keyed by content hash.
+    thumbnail_cache: RefCell<HashMap<ContentHash, gtk4::gdk::Texture>>,
 }
 
 impl WindowState {
@@ -52,6 +55,7 @@ impl WindowState {
 
     /// Append entries to the backing ListStore.
     fn append_entries(&self, entries: &[ClipboardEntry]) {
+        let mut cache = self.thumbnail_cache.borrow_mut();
         for entry in entries {
             let id = entry.id.unwrap_or(0);
             let ct = entry.content.content_type().as_str();
@@ -59,7 +63,21 @@ impl WindowState {
 
             let (preview, thumbnail) = match &entry.content {
                 EntryContent::Image(blob) => {
-                    let thumb = create_thumbnail_texture(blob, self.image_max_px);
+                    let thumb = if let Some(cached) = cache.get(&entry.content_hash) {
+                        Some(cached.clone())
+                    } else {
+                        let decoded = create_thumbnail_texture(blob, self.image_max_px);
+                        if let Some(ref texture) = decoded {
+                            // Evict oldest entries when cache exceeds page_size
+                            if cache.len() >= self.page_size {
+                                if let Some(&key) = cache.keys().next() {
+                                    cache.remove(&key);
+                                }
+                            }
+                            cache.insert(entry.content_hash, texture.clone());
+                        }
+                        decoded
+                    };
                     (String::new(), thumb)
                 }
                 EntryContent::Text(text) => {
@@ -80,6 +98,7 @@ impl WindowState {
     /// Reset pagination, clear store, load first page.
     fn reload(&self) {
         self.store.remove_all();
+        self.thumbnail_cache.borrow_mut().clear();
         *self.offset.borrow_mut() = 0;
         *self.all_loaded.borrow_mut() = false;
 
@@ -122,7 +141,7 @@ pub fn build_window(
     db_path: PathBuf,
     selected: Rc<RefCell<Option<SelectedContent>>>,
 ) {
-    let conn = match db::init_db(&db_path) {
+    let conn = match db::init_db_ui(&db_path) {
         Ok(c) => Rc::new(c),
         Err(e) => {
             eprintln!("error opening database: {e}");
@@ -141,6 +160,7 @@ pub fn build_window(
         page_size: config.history_page_size,
         preview_chars: config.preview_text_chars,
         image_max_px: config.image_preview_max_px,
+        thumbnail_cache: RefCell::new(HashMap::new()),
     });
 
     // Load first page

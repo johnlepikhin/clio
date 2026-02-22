@@ -8,6 +8,9 @@ use crate::errors::{AppError, Result};
 /// Use this constant for all chrono format calls to ensure consistency.
 pub const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f";
 
+/// Fixed-size blake3 hash (32 bytes). Replaces `Vec<u8>` to avoid heap allocation.
+pub type ContentHash = [u8; 32];
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContentType {
     Text,
@@ -74,7 +77,7 @@ impl EntryContent {
 pub struct ClipboardEntry {
     pub id: Option<i64>,
     pub content: EntryContent,
-    pub content_hash: Vec<u8>,
+    pub content_hash: ContentHash,
     pub source_app: Option<String>,
     pub created_at: Option<String>,
     pub metadata: Option<String>,
@@ -98,7 +101,7 @@ impl ClipboardEntry {
     pub fn from_image(
         width: u32,
         height: u32,
-        rgba_bytes: &[u8],
+        rgba_bytes: Vec<u8>,
         source_app: Option<String>,
     ) -> Result<Self> {
         let png_bytes = encode_rgba_to_png(width, height, rgba_bytes)?;
@@ -119,12 +122,12 @@ impl ClipboardEntry {
     }
 }
 
-pub fn compute_hash(data: &[u8]) -> Vec<u8> {
-    blake3::hash(data).as_bytes().to_vec()
+pub fn compute_hash(data: &[u8]) -> ContentHash {
+    *blake3::hash(data).as_bytes()
 }
 
-pub fn encode_rgba_to_png(width: u32, height: u32, rgba_bytes: &[u8]) -> Result<Vec<u8>> {
-    let img = RgbaImage::from_raw(width, height, rgba_bytes.to_vec()).ok_or_else(|| {
+pub fn encode_rgba_to_png(width: u32, height: u32, rgba_bytes: Vec<u8>) -> Result<Vec<u8>> {
+    let img = RgbaImage::from_raw(width, height, rgba_bytes).ok_or_else(|| {
         AppError::Image(image::ImageError::Parameter(
             image::error::ParameterError::from_kind(
                 image::error::ParameterErrorKind::DimensionMismatch,
@@ -167,7 +170,7 @@ mod tests {
     #[test]
     fn test_from_image() {
         let rgba = vec![255u8; 4 * 2 * 2]; // 2x2 white image
-        let entry = ClipboardEntry::from_image(2, 2, &rgba, None).unwrap();
+        let entry = ClipboardEntry::from_image(2, 2, rgba, None).unwrap();
         assert_eq!(entry.content.content_type(), ContentType::Image);
         assert!(entry.content.text().is_none());
         let blob = entry.content.blob().unwrap();

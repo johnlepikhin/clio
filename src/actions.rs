@@ -524,7 +524,7 @@ mod tests {
         });
 
         let rgba = vec![255u8; 4 * 2 * 2];
-        let entry = ClipboardEntry::from_image(2, 2, &rgba, None).unwrap();
+        let entry = ClipboardEntry::from_image(2, 2, rgba, None).unwrap();
         let result = apply_rules(&[rule], &entry);
         assert!(result.expires_at.is_none());
     }
@@ -545,7 +545,7 @@ mod tests {
         });
 
         let rgba = vec![255u8; 4 * 2 * 2];
-        let entry = ClipboardEntry::from_image(2, 2, &rgba, Some("GIMP".into())).unwrap();
+        let entry = ClipboardEntry::from_image(2, 2, rgba, Some("GIMP".into())).unwrap();
         let result = apply_rules(&[rule], &entry);
         assert!(result.expires_at.is_some());
         // Command should not apply to images (but here there's no command, just TTL)

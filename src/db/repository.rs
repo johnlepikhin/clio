@@ -4,27 +4,27 @@ use chrono::{Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection};
 
 use crate::errors::{AppError, Result};
-use crate::models::entry::{ClipboardEntry, ContentType, EntryContent, TIMESTAMP_FORMAT};
+use crate::models::entry::{ClipboardEntry, ContentHash, ContentType, EntryContent, TIMESTAMP_FORMAT};
 
 pub fn insert_entry(conn: &Connection, entry: &ClipboardEntry) -> Result<i64> {
-    conn.execute(
+    let mut stmt = conn.prepare_cached(
         "INSERT INTO clipboard_entries (content_type, text_content, blob_content, content_hash, source_app, metadata, expires_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            entry.content.content_type().as_str(),
-            entry.content.text(),
-            entry.content.blob(),
-            entry.content_hash,
-            entry.source_app,
-            entry.metadata.as_deref().unwrap_or("{}"),
-            entry.expires_at,
-        ],
     )?;
+    stmt.execute(params![
+        entry.content.content_type().as_str(),
+        entry.content.text(),
+        entry.content.blob(),
+        &entry.content_hash as &[u8],
+        entry.source_app,
+        entry.metadata.as_deref().unwrap_or("{}"),
+        entry.expires_at,
+    ])?;
     Ok(conn.last_insert_rowid())
 }
 
 pub fn find_by_hash(conn: &Connection, hash: &[u8]) -> Result<Option<ClipboardEntry>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries WHERE content_hash = ?1",
     )?;
@@ -49,7 +49,7 @@ pub fn update_timestamp_and_expiry(
 
 #[cfg(test)]
 pub fn list_entries(conn: &Connection, limit: usize) -> Result<Vec<ClipboardEntry>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1",
     )?;
@@ -62,7 +62,7 @@ pub fn list_entries_page(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<ClipboardEntry>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
     )?;
@@ -78,7 +78,7 @@ pub fn search_entries_page(
 ) -> Result<Vec<ClipboardEntry>> {
     let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
     let pattern = format!("%{escaped}%");
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries
          WHERE text_content LIKE ?1 ESCAPE '\\'
@@ -94,7 +94,7 @@ pub fn delete_entry(conn: &Connection, id: i64) -> Result<()> {
 }
 
 pub fn get_entry_content(conn: &Connection, id: i64) -> Result<Option<ClipboardEntry>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries WHERE id = ?1",
     )?;
@@ -151,7 +151,7 @@ pub fn prune_expired(conn: &Connection, max_age: Option<Duration>) -> Result<u64
 
 pub fn get_latest_active(conn: &Connection) -> Result<Option<ClipboardEntry>> {
     let now_str = Utc::now().format(TIMESTAMP_FORMAT).to_string();
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries
          WHERE expires_at IS NULL OR expires_at >= ?1
@@ -206,10 +206,19 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClipboardEntry> {
         ContentType::Unknown => EntryContent::Text(text_content.unwrap_or_default()),
     };
 
+    let hash_vec: Vec<u8> = row.get(4)?;
+    let content_hash: ContentHash = hash_vec.try_into().map_err(|v: Vec<u8>| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Blob,
+            format!("expected 32-byte hash, got {}", v.len()).into(),
+        )
+    })?;
+
     Ok(ClipboardEntry {
         id: Some(row.get(0)?),
         content,
-        content_hash: row.get(4)?,
+        content_hash,
         source_app: row.get(5)?,
         created_at: row.get(6)?,
         metadata: row.get(7)?,
@@ -401,7 +410,7 @@ mod tests {
 
         conn.execute(
             "INSERT INTO clipboard_entries (content_type, text_content, content_hash, created_at)
-             VALUES ('text', 'old', X'00', strftime('%Y-%m-%dT%H:%M:%f', 'now', '-2 hours'))",
+             VALUES ('text', 'old', X'0000000000000000000000000000000000000000000000000000000000000000', strftime('%Y-%m-%dT%H:%M:%f', 'now', '-2 hours'))",
             [],
         )
         .unwrap();
