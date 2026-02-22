@@ -4,12 +4,12 @@ use chrono::{Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection};
 
 use crate::errors::{AppError, Result};
-use crate::models::entry::{ClipboardEntry, ContentType, EntryContent};
+use crate::models::entry::{ClipboardEntry, ContentType, EntryContent, TIMESTAMP_FORMAT};
 
 pub fn insert_entry(conn: &Connection, entry: &ClipboardEntry) -> Result<i64> {
     conn.execute(
-        "INSERT INTO clipboard_entries (content_type, text_content, blob_content, content_hash, source_app, metadata)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO clipboard_entries (content_type, text_content, blob_content, content_hash, source_app, metadata, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             entry.content.content_type().as_str(),
             entry.content.text(),
@@ -17,6 +17,7 @@ pub fn insert_entry(conn: &Connection, entry: &ClipboardEntry) -> Result<i64> {
             entry.content_hash,
             entry.source_app,
             entry.metadata.as_deref().unwrap_or("{}"),
+            entry.expires_at,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -24,7 +25,7 @@ pub fn insert_entry(conn: &Connection, entry: &ClipboardEntry) -> Result<i64> {
 
 pub fn find_by_hash(conn: &Connection, hash: &[u8]) -> Result<Option<ClipboardEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries WHERE content_hash = ?1",
     )?;
     let mut rows = stmt.query(params![hash])?;
@@ -34,10 +35,14 @@ pub fn find_by_hash(conn: &Connection, hash: &[u8]) -> Result<Option<ClipboardEn
     }
 }
 
-pub fn update_timestamp(conn: &Connection, id: i64) -> Result<()> {
+pub fn update_timestamp_and_expiry(
+    conn: &Connection,
+    id: i64,
+    expires_at: Option<&str>,
+) -> Result<()> {
     conn.execute(
-        "UPDATE clipboard_entries SET created_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') WHERE id = ?1",
-        params![id],
+        "UPDATE clipboard_entries SET created_at = strftime('%Y-%m-%dT%H:%M:%f', 'now'), expires_at = ?2 WHERE id = ?1",
+        params![id, expires_at],
     )?;
     Ok(())
 }
@@ -45,7 +50,7 @@ pub fn update_timestamp(conn: &Connection, id: i64) -> Result<()> {
 #[cfg(test)]
 pub fn list_entries(conn: &Connection, limit: usize) -> Result<Vec<ClipboardEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit as i64], row_to_entry)?;
@@ -58,7 +63,7 @@ pub fn list_entries_page(
     offset: usize,
 ) -> Result<Vec<ClipboardEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt.query_map(params![limit as i64, offset as i64], row_to_entry)?;
@@ -74,7 +79,7 @@ pub fn search_entries_page(
     let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
     let pattern = format!("%{escaped}%");
     let mut stmt = conn.prepare(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries
          WHERE text_content LIKE ?1 ESCAPE '\\'
          ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
@@ -90,7 +95,7 @@ pub fn delete_entry(conn: &Connection, id: i64) -> Result<()> {
 
 pub fn get_entry_content(conn: &Connection, id: i64) -> Result<Option<ClipboardEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![id])?;
@@ -118,19 +123,30 @@ pub fn prune_oldest(conn: &Connection, max_count: usize) -> Result<u64> {
 }
 
 pub fn prune_expired(conn: &Connection, max_age: Option<Duration>) -> Result<u64> {
-    let age = match max_age {
-        Some(a) => a,
-        None => return Ok(0),
-    };
-    let chrono_age = ChronoDuration::from_std(age)
-        .map_err(|_| crate::errors::AppError::Config("max_age duration too large".to_owned()))?;
-    let cutoff = Utc::now() - chrono_age;
-    let cutoff_str = cutoff.format("%Y-%m-%dT%H:%M:%.3f").to_string();
-    let deleted = conn.execute(
-        "DELETE FROM clipboard_entries WHERE created_at < ?1",
-        params![cutoff_str],
+    let mut total_deleted: u64 = 0;
+
+    // Prune entries with per-entry TTL (expires_at)
+    let now_str = Utc::now().format(TIMESTAMP_FORMAT).to_string();
+    let ttl_deleted = conn.execute(
+        "DELETE FROM clipboard_entries WHERE expires_at IS NOT NULL AND expires_at < ?1",
+        params![now_str],
     )?;
-    Ok(deleted as u64)
+    total_deleted += ttl_deleted as u64;
+
+    // Prune entries by global max_age
+    if let Some(age) = max_age {
+        let chrono_age = ChronoDuration::from_std(age)
+            .map_err(|_| crate::errors::AppError::Config("max_age duration too large".to_owned()))?;
+        let cutoff = Utc::now() - chrono_age;
+        let cutoff_str = cutoff.format(TIMESTAMP_FORMAT).to_string();
+        let deleted = conn.execute(
+            "DELETE FROM clipboard_entries WHERE created_at < ?1",
+            params![cutoff_str],
+        )?;
+        total_deleted += deleted as u64;
+    }
+
+    Ok(total_deleted)
 }
 
 pub fn save_or_update(
@@ -146,7 +162,7 @@ pub fn save_or_update(
         let id = existing
             .id
             .ok_or(AppError::Database(rusqlite::Error::QueryReturnedNoRows))?;
-        update_timestamp(conn, id)?;
+        update_timestamp_and_expiry(conn, id, entry.expires_at.as_deref())?;
         return Ok(id);
     }
     let id = insert_entry(conn, entry)?;
@@ -182,6 +198,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClipboardEntry> {
         source_app: row.get(5)?,
         created_at: row.get(6)?,
         metadata: row.get(7)?,
+        expires_at: row.get(8)?,
     })
 }
 
@@ -386,5 +403,79 @@ mod tests {
         let entries = list_entries(&conn, 100).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content.text(), Some("fresh"));
+    }
+
+    #[test]
+    fn test_prune_expired_deletes_by_expires_at() {
+        let conn = setup();
+
+        // Entry with expired per-entry TTL
+        let mut entry = ClipboardEntry::from_text("expiring".to_string(), None);
+        entry.expires_at = Some("2000-01-01T00:00:00.000".to_string());
+        insert_entry(&conn, &entry).unwrap();
+
+        // Entry without TTL
+        let fresh = ClipboardEntry::from_text("fresh".to_string(), None);
+        insert_entry(&conn, &fresh).unwrap();
+
+        let entries = list_entries(&conn, 100).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Even without global max_age, per-entry TTL should be pruned
+        let deleted = prune_expired(&conn, None).unwrap();
+        assert_eq!(deleted, 1);
+
+        let entries = list_entries(&conn, 100).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content.text(), Some("fresh"));
+    }
+
+    #[test]
+    fn test_prune_expired_keeps_future_expires_at() {
+        let conn = setup();
+
+        // Entry with future TTL
+        let mut entry = ClipboardEntry::from_text("future".to_string(), None);
+        entry.expires_at = Some("2099-01-01T00:00:00.000".to_string());
+        insert_entry(&conn, &entry).unwrap();
+
+        let deleted = prune_expired(&conn, None).unwrap();
+        assert_eq!(deleted, 0);
+
+        let entries = list_entries(&conn, 100).unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_save_or_update_preserves_expires_at() {
+        let conn = setup();
+
+        let mut entry = ClipboardEntry::from_text("ttl-entry".to_string(), None);
+        entry.expires_at = Some("2099-01-01T00:00:00.000".to_string());
+        let id = save_or_update(&conn, &entry, 500, None).unwrap();
+
+        let found = get_entry_content(&conn, id).unwrap().unwrap();
+        assert_eq!(found.expires_at.as_deref(), Some("2099-01-01T00:00:00.000"));
+    }
+
+    #[test]
+    fn test_save_or_update_updates_expires_at_on_dedup() {
+        let conn = setup();
+
+        // First save with no TTL
+        let entry1 = ClipboardEntry::from_text("hello".to_string(), None);
+        let id1 = save_or_update(&conn, &entry1, 500, None).unwrap();
+
+        let found1 = get_entry_content(&conn, id1).unwrap().unwrap();
+        assert!(found1.expires_at.is_none());
+
+        // Same content, now with TTL
+        let mut entry2 = ClipboardEntry::from_text("hello".to_string(), None);
+        entry2.expires_at = Some("2099-01-01T00:00:00.000".to_string());
+        let id2 = save_or_update(&conn, &entry2, 500, None).unwrap();
+
+        assert_eq!(id1, id2);
+        let found2 = get_entry_content(&conn, id2).unwrap().unwrap();
+        assert_eq!(found2.expires_at.as_deref(), Some("2099-01-01T00:00:00.000"));
     }
 }

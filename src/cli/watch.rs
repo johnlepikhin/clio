@@ -10,11 +10,12 @@ use arboard::LinuxClipboardKind;
 
 use anyhow::Context;
 
+use crate::actions;
 use crate::clipboard::source_app;
 use crate::clipboard::{self, ClipboardContent};
-use crate::config::{Config, SyncMode};
+use crate::config::{CompiledRule, Config, SyncMode};
 use crate::db::repository;
-use crate::models::entry::{compute_hash, ClipboardEntry};
+use crate::models::entry::{compute_hash, ClipboardEntry, EntryContent};
 
 /// Shared state for the watch loop.
 struct WatchState<'a> {
@@ -24,12 +25,14 @@ struct WatchState<'a> {
     max_size: u64,
     prune_interval: Duration,
     last_prune: Cell<Instant>,
+    rules: Vec<CompiledRule>,
+    has_ttl_rules: bool,
 }
 
 impl WatchState<'_> {
     /// Run prune_expired periodically, independent of clipboard changes.
     fn maybe_prune(&self) {
-        if self.max_age.is_none() {
+        if self.max_age.is_none() && !self.has_ttl_rules {
             return;
         }
         if self.last_prune.get().elapsed() < self.prune_interval {
@@ -56,6 +59,23 @@ impl WatchState<'_> {
         }
     }
 
+    /// Apply action rules to an entry, mutating it in place.
+    fn apply_actions(&self, entry: &mut ClipboardEntry) {
+        if self.rules.is_empty() {
+            return;
+        }
+
+        let result = actions::apply_rules(&self.rules, entry);
+
+        if let Some(transformed) = result.transformed_text {
+            let new_hash = compute_hash(transformed.as_bytes());
+            entry.content = EntryContent::Text(transformed);
+            entry.content_hash = new_hash;
+        }
+
+        entry.expires_at = result.expires_at;
+    }
+
     /// Save entry to DB if within size limit.
     fn save_if_fits(&self, entry: &ClipboardEntry) {
         if entry.content_size_bytes() as u64 > self.max_size {
@@ -71,9 +91,10 @@ impl WatchState<'_> {
         }
     }
 
-    /// Process a clipboard content change: build entry and save.
+    /// Process a clipboard content change: build entry, apply actions, and save.
     fn process_change(&self, content: &ClipboardContent) {
-        if let Some(entry) = Self::build_entry(content) {
+        if let Some(mut entry) = Self::build_entry(content) {
+            self.apply_actions(&mut entry);
             self.save_if_fits(&entry);
         }
     }
@@ -104,6 +125,13 @@ pub fn run(conn: &Connection, config: &Config) -> anyhow::Result<()> {
     })
     .context("failed to set Ctrl+C handler")?;
 
+    let rules = config.compile_rules();
+    let has_ttl_rules = rules.iter().any(|r| r.ttl.is_some());
+
+    if !rules.is_empty() {
+        eprintln!("loaded {} action rule(s)", rules.len());
+    }
+
     eprintln!(
         "watching clipboard (interval: {}ms, sync: {})...",
         config.watch_interval_ms, config.sync_mode
@@ -118,6 +146,8 @@ pub fn run(conn: &Connection, config: &Config) -> anyhow::Result<()> {
         max_size: config.max_entry_size_kb * 1024,
         prune_interval,
         last_prune: Cell::new(Instant::now()),
+        rules,
+        has_ttl_rules,
     };
     let interval = Duration::from_millis(config.watch_interval_ms);
     let sync_mode = config.sync_mode;
@@ -204,10 +234,11 @@ fn run_sync(
         if pr_changed {
             if let Some(ref content) = pr_content {
                 if let Some(text) = content_text(content) {
-                    let entry = ClipboardEntry::from_text(
+                    let mut entry = ClipboardEntry::from_text(
                         text.to_owned(),
                         source_app::detect_source_app(),
                     );
+                    state.apply_actions(&mut entry);
                     state.save_if_fits(&entry);
                 }
             }

@@ -256,7 +256,7 @@ fn setup_activate(
                         }
                     }
                 }
-                let _ = repository::update_timestamp(&state.conn, entry_id);
+                let _ = repository::update_timestamp_and_expiry(&state.conn, entry_id, None);
             }
             win.close();
         }

@@ -4,6 +4,10 @@ use image::{ImageFormat, RgbaImage};
 
 use crate::errors::{AppError, Result};
 
+/// ISO 8601 timestamp format matching SQLite's strftime('%Y-%m-%dT%H:%M:%f').
+/// Use this constant for all chrono format calls to ensure consistency.
+pub const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContentType {
     Text,
@@ -74,6 +78,7 @@ pub struct ClipboardEntry {
     pub source_app: Option<String>,
     pub created_at: Option<String>,
     pub metadata: Option<String>,
+    pub expires_at: Option<String>,
 }
 
 impl ClipboardEntry {
@@ -86,6 +91,7 @@ impl ClipboardEntry {
             source_app,
             created_at: None,
             metadata: None,
+            expires_at: None,
         }
     }
 
@@ -104,6 +110,7 @@ impl ClipboardEntry {
             source_app,
             created_at: None,
             metadata: None,
+            expires_at: None,
         })
     }
 

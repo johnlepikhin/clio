@@ -7,7 +7,10 @@ use super::ConfigCommands;
 pub fn run(config_path: &Path, command: &ConfigCommands) -> anyhow::Result<()> {
     match command {
         ConfigCommands::Show => cmd_show(config_path),
-        ConfigCommands::Init { force } => cmd_init(config_path, *force),
+        ConfigCommands::Init { force, output } => {
+            let target = output.as_deref().unwrap_or(config_path);
+            cmd_init(target, *force)
+        }
         ConfigCommands::Validate => cmd_validate(config_path),
         ConfigCommands::Path => cmd_path(config_path),
     }

@@ -1,6 +1,8 @@
 mod types;
 
-pub use types::{Config, SyncMode};
+pub use types::{CompiledRule, Config, SyncMode};
+#[cfg(test)]
+pub use types::{ActionRule, RuleActions, RuleConditions};
 
 use std::path::{Path, PathBuf};
 
@@ -300,5 +302,118 @@ mod tests {
         let yaml = Config::default_yaml();
         let config: Config = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(config.image_preview_max_px, 640);
+    }
+
+    #[test]
+    fn test_config_without_actions_defaults_to_empty() {
+        let yaml = "max_history: 100\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.actions.is_empty());
+    }
+
+    #[test]
+    fn test_config_with_actions_parses() {
+        let yaml = r#"
+actions:
+  - name: "Expire passwords"
+    conditions:
+      source_app: "KeePassXC"
+    actions:
+      ttl: "30s"
+  - name: "Expire API keys"
+    conditions:
+      content_regex: "^sk-"
+    actions:
+      ttl: "1m"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.actions.len(), 2);
+        assert_eq!(config.actions[0].name, "Expire passwords");
+        assert_eq!(
+            config.actions[0].conditions.source_app.as_deref(),
+            Some("KeePassXC")
+        );
+        assert_eq!(config.actions[0].actions.ttl, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(config.actions[1].name, "Expire API keys");
+        assert_eq!(
+            config.actions[1].conditions.content_regex.as_deref(),
+            Some("^sk-")
+        );
+        assert_eq!(config.actions[1].actions.ttl, Some(std::time::Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn test_config_with_command_action_parses() {
+        let yaml = r#"
+actions:
+  - name: "Strip tracking"
+    conditions:
+      content_regex: "^https://"
+    actions:
+      command: ["sed", "s/utm_[^&]*//g"]
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.actions.len(), 1);
+        assert_eq!(
+            config.actions[0].actions.command,
+            Some(vec!["sed".to_string(), "s/utm_[^&]*//g".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_config_validate_rejects_invalid_regex() {
+        let yaml = r#"
+actions:
+  - name: "Bad regex"
+    conditions:
+      content_regex: "[invalid"
+    actions:
+      ttl: "30s"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let errors = config.validate().unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("invalid regex")));
+    }
+
+    #[test]
+    fn test_config_validate_rejects_no_conditions() {
+        let yaml = r#"
+actions:
+  - name: "No conditions"
+    conditions: {}
+    actions:
+      ttl: "30s"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let errors = config.validate().unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("at least one condition")));
+    }
+
+    #[test]
+    fn test_compile_rules_skips_invalid() {
+        let yaml = r#"
+actions:
+  - name: "Good rule"
+    conditions:
+      source_app: "Firefox"
+    actions:
+      ttl: "30s"
+  - name: "Bad rule"
+    conditions:
+      content_regex: "[invalid"
+    actions:
+      ttl: "30s"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let compiled = config.compile_rules();
+        assert_eq!(compiled.len(), 1);
+        assert_eq!(compiled[0].name, "Good rule");
+    }
+
+    #[test]
+    fn test_default_yaml_with_actions_parses() {
+        let yaml = Config::default_yaml();
+        let config: Config = serde_yaml::from_str(&yaml).unwrap();
+        assert!(config.actions.is_empty());
     }
 }

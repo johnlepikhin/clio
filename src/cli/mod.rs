@@ -51,6 +51,9 @@ pub enum ConfigCommands {
         /// Overwrite existing file
         #[arg(long)]
         force: bool,
+        /// Write config to this path instead of the default location
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
     },
     /// Validate configuration file
     Validate,

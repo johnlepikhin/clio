@@ -1,6 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +31,78 @@ impl fmt::Display for SyncMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleConditions {
+    pub source_app: Option<String>,
+    pub content_regex: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleActions {
+    #[serde(with = "humantime_serde::option", default)]
+    pub ttl: Option<Duration>,
+    pub command: Option<Vec<String>>,
+    #[serde(with = "humantime_serde::option", default)]
+    pub command_timeout: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionRule {
+    pub name: String,
+    pub conditions: RuleConditions,
+    pub actions: RuleActions,
+}
+
+/// Validated version of ActionRule with compiled regex.
+#[derive(Debug, Clone)]
+pub struct CompiledRule {
+    pub name: String,
+    pub source_app: Option<String>,
+    pub content_regex: Option<Regex>,
+    pub ttl: Option<Duration>,
+    pub command: Option<Vec<String>>,
+    pub command_timeout: Duration,
+}
+
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl ActionRule {
+    /// Validate and compile this rule. Returns error messages for invalid rules.
+    pub fn compile(&self) -> Result<CompiledRule, String> {
+        if self.conditions.source_app.is_none() && self.conditions.content_regex.is_none() {
+            return Err(format!(
+                "rule '{}': at least one condition (source_app or content_regex) is required",
+                self.name
+            ));
+        }
+
+        let content_regex = match &self.conditions.content_regex {
+            Some(pattern) => match Regex::new(pattern) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    return Err(format!("rule '{}': invalid regex '{}': {}", self.name, pattern, e));
+                }
+            },
+            None => None,
+        };
+
+        if let Some(ref cmd) = self.actions.command {
+            if cmd.is_empty() {
+                return Err(format!("rule '{}': command must not be empty", self.name));
+            }
+        }
+
+        Ok(CompiledRule {
+            name: self.name.clone(),
+            source_app: self.conditions.source_app.clone(),
+            content_regex,
+            ttl: self.actions.ttl,
+            command: self.actions.command.clone(),
+            command_timeout: self.actions.command_timeout.unwrap_or(DEFAULT_COMMAND_TIMEOUT),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub max_history: usize,
@@ -44,6 +117,8 @@ pub struct Config {
     pub image_preview_max_px: i32,
     #[serde(with = "humantime_serde::option", default)]
     pub max_age: Option<Duration>,
+    #[serde(default)]
+    pub actions: Vec<ActionRule>,
 }
 
 impl Default for Config {
@@ -60,6 +135,7 @@ impl Default for Config {
             history_page_size: 50,
             image_preview_max_px: 640,
             max_age: None,
+            actions: Vec::new(),
         }
     }
 }
@@ -103,6 +179,52 @@ image_preview_max_px: 640
 # Delete entries older than this duration (e.g. 30d, 12h, 90m).
 # Omit or leave empty to keep entries forever.
 # max_age: 30d
+
+# Action rules: conditions → actions applied to matching clipboard entries.
+# actions:
+#   - name: "Expire passwords quickly"
+#     conditions:
+#       source_app: "KeePassXC"
+#     actions:
+#       ttl: "30s"
+#
+#   - name: "Expire API keys"
+#     conditions:
+#       content_regex: "^(sk-|ghp_|gho_|ghs_|AKIA|xox[bpas]-|glpat-)[A-Za-z0-9_\\-]+"
+#     actions:
+#       ttl: "1m"
+#
+#   - name: "Expire private keys & certificates"
+#     conditions:
+#       content_regex: "^-----BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"
+#     actions:
+#       ttl: "30s"
+#
+#   - name: "Expire connection strings"
+#     conditions:
+#       content_regex: "^(postgres|mysql|mongodb|redis)://[^\\s]*@"
+#     actions:
+#       ttl: "2m"
+#
+#   - name: "Expire env secrets"
+#     conditions:
+#       content_regex: "(?i)(PASSWORD|SECRET|TOKEN|API_KEY)\\s*[=:]\\s*\\S+"
+#     actions:
+#       ttl: "2m"
+#
+#   - name: "Strip tracking params"
+#     conditions:
+#       content_regex: "^https?://.*[?&](utm_|fbclid|gclid|msclkid|yclid|_ga|_gl|mc_eid|igshid|ref_)"
+#     actions:
+#       command: ["sed", "s/[?&]\\(utm_[^&]*\\|fbclid=[^&]*\\|gclid=[^&]*\\|msclkid=[^&]*\\|yclid=[^&]*\\|_ga=[^&]*\\|_gl=[^&]*\\|mc_eid=[^&]*\\|igshid=[^&]*\\|ref_=[^&]*\\)//g"]
+#       command_timeout: "5s"
+#
+#   - name: "Clean trailing whitespace"
+#     conditions:
+#       content_regex: "[ \\t]+$"
+#     actions:
+#       command: ["sed", "s/[[:space:]]*$//"]
+#       command_timeout: "5s"
 "#
         .to_owned()
     }
@@ -137,10 +259,38 @@ image_preview_max_px: 640
             errors.push("image_preview_max_px must be greater than 0".to_owned());
         }
 
+        for rule in &self.actions {
+            if let Err(e) = rule.compile() {
+                errors.push(e);
+            }
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
             Err(errors)
         }
+    }
+
+    /// Compile all action rules into ready-to-use form.
+    /// Invalid rules are skipped with warnings printed to stderr.
+    pub fn compile_rules(&self) -> Vec<CompiledRule> {
+        let mut compiled = Vec::new();
+        for rule in &self.actions {
+            match rule.compile() {
+                Ok(r) => {
+                    if r.ttl.is_none() && r.command.is_none() {
+                        eprintln!(
+                            "warning: skipping rule '{}': no actions (no ttl or command)",
+                            r.name
+                        );
+                        continue;
+                    }
+                    compiled.push(r);
+                }
+                Err(e) => eprintln!("warning: skipping action rule: {e}"),
+            }
+        }
+        compiled
     }
 }
