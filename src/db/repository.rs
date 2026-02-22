@@ -6,6 +6,11 @@ use rusqlite::{params, Connection};
 use crate::errors::{AppError, Result};
 use crate::models::entry::{ClipboardEntry, ContentHash, ContentType, EntryContent, TIMESTAMP_FORMAT};
 
+/// Escape special LIKE characters (`%`, `_`, `\`) for safe use in SQL LIKE patterns.
+fn escape_like(query: &str) -> String {
+    query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
 pub fn insert_entry(conn: &Connection, entry: &ClipboardEntry) -> Result<i64> {
     let mut stmt = conn.prepare_cached(
         "INSERT INTO clipboard_entries (content_type, text_content, blob_content, content_hash, source_app, metadata, expires_at)
@@ -76,6 +81,7 @@ pub fn list_entries(conn: &Connection, limit: usize) -> Result<Vec<ClipboardEntr
     collect_entries(rows)
 }
 
+#[cfg(test)]
 pub fn list_entries_page(
     conn: &Connection,
     limit: usize,
@@ -89,14 +95,38 @@ pub fn list_entries_page(
     collect_entries(rows)
 }
 
+/// Like `list_entries_page`, but truncates `text_content` to `preview_chars`
+/// characters in SQL to avoid transferring large blobs for UI preview.
+///
+/// **Note:** returned entries contain truncated text but the original `content_hash`
+/// (computed from the full text). Do not use the hash for content comparison.
+pub fn list_entries_preview(
+    conn: &Connection,
+    limit: usize,
+    offset: usize,
+    preview_chars: usize,
+) -> Result<Vec<ClipboardEntry>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, content_type,
+                CASE WHEN content_type = 'text' THEN substr(text_content, 1, ?3) ELSE text_content END,
+                blob_content, content_hash, source_app, created_at, metadata, expires_at
+         FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+    )?;
+    let rows = stmt.query_map(
+        params![limit as i64, offset as i64, preview_chars as i64],
+        row_to_entry,
+    )?;
+    collect_entries(rows)
+}
+
+#[cfg(test)]
 pub fn search_entries_page(
     conn: &Connection,
     query: &str,
     limit: usize,
     offset: usize,
 ) -> Result<Vec<ClipboardEntry>> {
-    let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-    let pattern = format!("%{escaped}%");
+    let pattern = format!("%{}%", escape_like(query));
     let mut stmt = conn.prepare_cached(
         "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
          FROM clipboard_entries
@@ -104,6 +134,36 @@ pub fn search_entries_page(
          ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
     )?;
     let rows = stmt.query_map(params![pattern, limit as i64, offset as i64], row_to_entry)?;
+    collect_entries(rows)
+}
+
+/// Like `search_entries_page`, but truncates `text_content` to `preview_chars`
+/// characters in SQL to avoid transferring large blobs for UI preview.
+/// LIKE still matches against the full `text_content`, only the returned column
+/// is truncated.
+///
+/// **Note:** returned entries contain truncated text but the original `content_hash`
+/// (computed from the full text). Do not use the hash for content comparison.
+pub fn search_entries_preview(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    offset: usize,
+    preview_chars: usize,
+) -> Result<Vec<ClipboardEntry>> {
+    let pattern = format!("%{}%", escape_like(query));
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, content_type,
+                CASE WHEN content_type = 'text' THEN substr(text_content, 1, ?4) ELSE text_content END,
+                blob_content, content_hash, source_app, created_at, metadata, expires_at
+         FROM clipboard_entries
+         WHERE text_content LIKE ?1 ESCAPE '\\'
+         ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
+    )?;
+    let rows = stmt.query_map(
+        params![pattern, limit as i64, offset as i64, preview_chars as i64],
+        row_to_entry,
+    )?;
     collect_entries(rows)
 }
 
@@ -408,6 +468,57 @@ mod tests {
 
         let none = search_entries_page(&conn, "cherry", 10, 0).unwrap();
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn test_list_entries_preview_truncates_text() {
+        let conn = setup();
+        let long_text = "a".repeat(1000);
+        let entry = ClipboardEntry::from_text(long_text, None);
+        insert_entry(&conn, &entry).unwrap();
+
+        let entries = list_entries_preview(&conn, 10, 0, 50).unwrap();
+        assert_eq!(entries.len(), 1);
+        let text = entries[0].content.text().unwrap();
+        assert_eq!(text.len(), 50);
+    }
+
+    #[test]
+    fn test_list_entries_preview_short_text_unchanged() {
+        let conn = setup();
+        let entry = ClipboardEntry::from_text("short".to_string(), None);
+        insert_entry(&conn, &entry).unwrap();
+
+        let entries = list_entries_preview(&conn, 10, 0, 50).unwrap();
+        assert_eq!(entries[0].content.text(), Some("short"));
+    }
+
+    #[test]
+    fn test_search_entries_preview_truncates_text() {
+        let conn = setup();
+        let long_text = format!("needle {}", "x".repeat(1000));
+        let entry = ClipboardEntry::from_text(long_text, None);
+        insert_entry(&conn, &entry).unwrap();
+
+        let entries = search_entries_preview(&conn, "needle", 10, 0, 20).unwrap();
+        assert_eq!(entries.len(), 1);
+        let text = entries[0].content.text().unwrap();
+        assert_eq!(text.len(), 20);
+    }
+
+    #[test]
+    fn test_search_entries_preview_finds_in_full_text() {
+        let conn = setup();
+        // Keyword is at position 500+, well beyond preview_chars=50
+        let long_text = format!("{}keyword_here", "x".repeat(500));
+        let entry = ClipboardEntry::from_text(long_text, None);
+        insert_entry(&conn, &entry).unwrap();
+
+        // Search should still find it (LIKE matches full text)
+        let entries = search_entries_preview(&conn, "keyword_here", 10, 0, 50).unwrap();
+        assert_eq!(entries.len(), 1);
+        // But returned text is truncated to 50 chars
+        assert_eq!(entries[0].content.text().unwrap().len(), 50);
     }
 
     #[test]

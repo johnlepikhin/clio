@@ -43,13 +43,26 @@ struct WindowState {
 
 impl WindowState {
     /// Fetch a page of entries from DB (respects current search query).
+    /// Text content is truncated to `preview_chars` in SQL to reduce I/O.
     fn fetch_page(&self, offset: usize) -> Vec<ClipboardEntry> {
         let query = self.search_query.borrow().clone();
         if query.is_empty() {
-            repository::list_entries_page(&self.conn, self.page_size, offset).unwrap_or_default()
+            repository::list_entries_preview(
+                &self.conn,
+                self.page_size,
+                offset,
+                self.preview_chars,
+            )
+            .unwrap_or_default()
         } else {
-            repository::search_entries_page(&self.conn, &query, self.page_size, offset)
-                .unwrap_or_default()
+            repository::search_entries_preview(
+                &self.conn,
+                &query,
+                self.page_size,
+                offset,
+                self.preview_chars,
+            )
+            .unwrap_or_default()
         }
     }
 
@@ -81,9 +94,11 @@ impl WindowState {
                     (String::new(), thumb)
                 }
                 EntryContent::Text(text) => {
-                    let (mut preview, was_truncated) =
-                        truncate_preview(text, self.preview_chars);
-                    if was_truncated {
+                    // Text is already truncated to preview_chars in SQL.
+                    // SQLite substr counts bytes for ASCII / codepoints for UTF-8,
+                    // so we check char count to decide if ellipsis is needed.
+                    let mut preview = text.clone();
+                    if text.chars().count() >= self.preview_chars {
                         preview.push('…');
                     }
                     (preview, None)
@@ -129,6 +144,7 @@ impl WindowState {
     }
 }
 
+#[cfg(test)]
 pub fn truncate_preview(text: &str, max_chars: usize) -> (String, bool) {
     let char_count = text.chars().count();
     if char_count <= max_chars {
@@ -167,8 +183,13 @@ pub fn build_window(
         thumbnail_cache: RefCell::new(HashMap::new()),
     });
 
-    // Load first page
-    let entries = match repository::list_entries_page(&state.conn, state.page_size, 0) {
+    // Load first page (text truncated in SQL for fast preview)
+    let entries = match repository::list_entries_preview(
+        &state.conn,
+        state.page_size,
+        0,
+        state.preview_chars,
+    ) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("error loading entries: {e}");
