@@ -31,9 +31,9 @@ cargo test [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECH
 Rust (edition 2021, stable toolchain): Follow standard conventions
 
 ## Recent Changes
+- 009-memory-optimization: Internal optimization, no new dependencies
 - 007-readme-docs: Added N/A (Markdown documentation only)
 - 006-history-row-separators: Added Rust (edition 2021, stable toolchain) + gtk4-rs 0.9
-- 005-history-ux-images: Added Rust (edition 2021, stable toolchain) + gtk4-rs 0.9 (ListView, SearchEntry, ScrolledWindow, gdk_pixbuf), rusqlite, serde, serde_yaml
 
 
 <!-- MANUAL ADDITIONS START -->
