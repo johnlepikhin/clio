@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,6 +27,10 @@ struct WatchState<'a> {
     last_prune: Cell<Instant>,
     rules: Vec<CompiledRule>,
     has_ttl_rules: bool,
+    /// When the current clipboard entry's TTL expires (None = no TTL).
+    current_expiry: Cell<Option<Instant>>,
+    /// Content hash of the current entry with TTL (to check if user changed clipboard).
+    current_expiry_hash: RefCell<Option<Vec<u8>>>,
 }
 
 impl WatchState<'_> {
@@ -60,9 +64,10 @@ impl WatchState<'_> {
     }
 
     /// Apply action rules to an entry, mutating it in place.
-    fn apply_actions(&self, entry: &mut ClipboardEntry) {
+    /// Returns the TTL duration if a TTL rule matched.
+    fn apply_actions(&self, entry: &mut ClipboardEntry) -> Option<Duration> {
         if self.rules.is_empty() {
-            return;
+            return None;
         }
 
         let result = actions::apply_rules(&self.rules, entry);
@@ -74,6 +79,7 @@ impl WatchState<'_> {
         }
 
         entry.expires_at = result.expires_at;
+        result.ttl
     }
 
     /// Save entry to DB if within size limit.
@@ -91,13 +97,86 @@ impl WatchState<'_> {
         }
     }
 
+    /// Update expiry tracking state after processing an entry.
+    fn update_expiry_tracking(&self, ttl: Option<Duration>, content_hash: &[u8]) {
+        if let Some(d) = ttl {
+            self.current_expiry.set(Some(Instant::now() + d));
+            *self.current_expiry_hash.borrow_mut() = Some(content_hash.to_vec());
+        } else {
+            self.current_expiry.set(None);
+            *self.current_expiry_hash.borrow_mut() = None;
+        }
+    }
+
     /// Process a clipboard content change: build entry, apply actions, and save.
     fn process_change(&self, content: &ClipboardContent) {
         if let Some(mut entry) = Self::build_entry(content) {
-            self.apply_actions(&mut entry);
+            let ttl = self.apply_actions(&mut entry);
             self.save_if_fits(&entry);
+            self.update_expiry_tracking(ttl, &entry.content_hash);
         }
     }
+
+    /// Check if the current TTL entry has expired and restore the previous entry.
+    /// Returns Some if clipboard was updated (hash + optional text for primary sync).
+    fn check_expiry_and_restore(&self) -> Option<RestoreResult> {
+        let expiry = self.current_expiry.get()?;
+        if Instant::now() < expiry {
+            return None;
+        }
+
+        // TTL expired — reset tracking
+        self.current_expiry.set(None);
+        let expired_hash = self.current_expiry_hash.borrow_mut().take();
+
+        // Prune expired entries from DB
+        if let Err(e) = repository::prune_expired(self.conn, self.max_age) {
+            eprintln!("error pruning expired entries: {e}");
+        }
+        self.last_prune.set(Instant::now());
+
+        // Check if the expired entry is still in clipboard
+        let current_cb_hash = clipboard::read_clipboard().ok().as_ref().and_then(content_hash);
+        let expired_still_in_clipboard = match (&current_cb_hash, &expired_hash) {
+            (Some(current), Some(expired)) => current == expired,
+            _ => false,
+        };
+
+        if !expired_still_in_clipboard {
+            return None;
+        }
+
+        // Restore previous active entry
+        eprintln!("clipboard entry expired, restoring previous");
+        match repository::get_latest_active(self.conn) {
+            Ok(Some(entry)) => {
+                if let Some(text) = entry.content.text() {
+                    let _ = clipboard::write_clipboard_text_sync(text);
+                    return Some(RestoreResult {
+                        clipboard_hash: entry.content_hash.clone(),
+                        restored_text: text.to_owned(),
+                    });
+                }
+                None
+            }
+            Ok(None) => {
+                let _ = clipboard::write_clipboard_text_sync("");
+                Some(RestoreResult {
+                    clipboard_hash: compute_hash("".as_bytes()),
+                    restored_text: String::new(),
+                })
+            }
+            Err(e) => {
+                eprintln!("error querying latest entry: {e}");
+                None
+            }
+        }
+    }
+}
+
+struct RestoreResult {
+    clipboard_hash: Vec<u8>,
+    restored_text: String,
 }
 
 /// Compute hash for clipboard content, or None if empty.
@@ -148,6 +227,8 @@ pub fn run(conn: &Connection, config: &Config) -> anyhow::Result<()> {
         last_prune: Cell::new(Instant::now()),
         rules,
         has_ttl_rules,
+        current_expiry: Cell::new(None),
+        current_expiry_hash: RefCell::new(None),
     };
     let interval = Duration::from_millis(config.watch_interval_ms);
     let sync_mode = config.sync_mode;
@@ -170,6 +251,10 @@ fn run_disabled(
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(interval);
         state.maybe_prune();
+
+        if let Some(result) = state.check_expiry_and_restore() {
+            last_hash = Some(result.clipboard_hash);
+        }
 
         let content = match clipboard::read_clipboard() {
             Ok(c) => c,
@@ -207,6 +292,17 @@ fn run_sync(
         std::thread::sleep(interval);
         state.maybe_prune();
 
+        if let Some(result) = state.check_expiry_and_restore() {
+            last_clipboard_hash = Some(result.clipboard_hash);
+            if matches!(sync_mode, SyncMode::Both | SyncMode::ToPrimary) {
+                let _ = clipboard::write_selection_text(
+                    LinuxClipboardKind::Primary,
+                    &result.restored_text,
+                );
+                last_primary_hash = Some(compute_hash(result.restored_text.as_bytes()));
+            }
+        }
+
         let cb_content = clipboard::read_selection(LinuxClipboardKind::Clipboard).ok();
         let pr_content = clipboard::read_selection(LinuxClipboardKind::Primary).ok();
 
@@ -238,8 +334,13 @@ fn run_sync(
                         text.to_owned(),
                         source_app::detect_source_app(),
                     );
-                    state.apply_actions(&mut entry);
+                    let ttl = state.apply_actions(&mut entry);
                     state.save_if_fits(&entry);
+
+                    // Track TTL for primary entries synced to clipboard
+                    if matches!(sync_mode, SyncMode::Both | SyncMode::ToClipboard) {
+                        state.update_expiry_tracking(ttl, &entry.content_hash);
+                    }
                 }
             }
 

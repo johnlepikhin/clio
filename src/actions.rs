@@ -16,6 +16,8 @@ pub struct ActionResult {
     pub transformed_text: Option<String>,
     /// Per-entry expiration timestamp (ISO 8601).
     pub expires_at: Option<String>,
+    /// Original TTL duration from the matching rule (for expiry tracking).
+    pub ttl: Option<Duration>,
 }
 
 /// Evaluate all rules against an entry and apply matching actions.
@@ -77,6 +79,7 @@ pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResu
     ActionResult {
         transformed_text,
         expires_at,
+        ttl,
     }
 }
 
@@ -221,6 +224,7 @@ mod tests {
         let result = apply_rules(&[], &entry);
         assert!(result.transformed_text.is_none());
         assert!(result.expires_at.is_none());
+        assert!(result.ttl.is_none());
     }
 
     #[test]
@@ -241,6 +245,7 @@ mod tests {
         let entry = text_entry("password123", Some("KeePassXC"));
         let result = apply_rules(&[rule], &entry);
         assert!(result.expires_at.is_some());
+        assert_eq!(result.ttl, Some(Duration::from_secs(30)));
         assert!(result.transformed_text.is_none());
     }
 

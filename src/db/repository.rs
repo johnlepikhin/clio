@@ -149,6 +149,21 @@ pub fn prune_expired(conn: &Connection, max_age: Option<Duration>) -> Result<u64
     Ok(total_deleted)
 }
 
+pub fn get_latest_active(conn: &Connection) -> Result<Option<ClipboardEntry>> {
+    let now_str = Utc::now().format(TIMESTAMP_FORMAT).to_string();
+    let mut stmt = conn.prepare(
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, created_at, metadata, expires_at
+         FROM clipboard_entries
+         WHERE expires_at IS NULL OR expires_at >= ?1
+         ORDER BY created_at DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![now_str])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row_to_entry(row)?)),
+        None => Ok(None),
+    }
+}
+
 pub fn save_or_update(
     conn: &Connection,
     entry: &ClipboardEntry,
@@ -477,5 +492,46 @@ mod tests {
         assert_eq!(id1, id2);
         let found2 = get_entry_content(&conn, id2).unwrap().unwrap();
         assert_eq!(found2.expires_at.as_deref(), Some("2099-01-01T00:00:00.000"));
+    }
+
+    #[test]
+    fn test_get_latest_active_returns_active_entry() {
+        let conn = setup();
+        let entry = ClipboardEntry::from_text("active".to_string(), None);
+        insert_entry(&conn, &entry).unwrap();
+
+        let result = get_latest_active(&conn).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().content.text(), Some("active"));
+    }
+
+    #[test]
+    fn test_get_latest_active_skips_expired() {
+        let conn = setup();
+
+        // Insert expired entry
+        let mut expired = ClipboardEntry::from_text("expired".to_string(), None);
+        expired.expires_at = Some("2000-01-01T00:00:00.000".to_string());
+        insert_entry(&conn, &expired).unwrap();
+
+        // Insert active entry (older by created_at but not expired)
+        let active = ClipboardEntry::from_text("active".to_string(), None);
+        insert_entry(&conn, &active).unwrap();
+
+        let result = get_latest_active(&conn).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().content.text(), Some("active"));
+    }
+
+    #[test]
+    fn test_get_latest_active_none_when_all_expired() {
+        let conn = setup();
+
+        let mut expired = ClipboardEntry::from_text("expired".to_string(), None);
+        expired.expires_at = Some("2000-01-01T00:00:00.000".to_string());
+        insert_entry(&conn, &expired).unwrap();
+
+        let result = get_latest_active(&conn).unwrap();
+        assert!(result.is_none());
     }
 }
