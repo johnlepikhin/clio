@@ -65,6 +65,12 @@ pub struct CompiledRule {
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
+const DEFAULT_PRUNE_INTERVAL: Duration = Duration::from_secs(3);
+
+fn default_prune_interval() -> Duration {
+    DEFAULT_PRUNE_INTERVAL
+}
+
 impl ActionRule {
     /// Validate and compile this rule. Returns error messages for invalid rules.
     pub fn compile(&self) -> Result<CompiledRule, String> {
@@ -117,6 +123,8 @@ pub struct Config {
     pub image_preview_max_px: i32,
     #[serde(with = "humantime_serde::option", default)]
     pub max_age: Option<Duration>,
+    #[serde(with = "humantime_serde", default = "default_prune_interval")]
+    pub prune_interval: Duration,
     #[serde(default)]
     pub actions: Vec<ActionRule>,
 }
@@ -135,6 +143,7 @@ impl Default for Config {
             history_page_size: 50,
             image_preview_max_px: 640,
             max_age: None,
+            prune_interval: DEFAULT_PRUNE_INTERVAL,
             actions: Vec::new(),
         }
     }
@@ -179,6 +188,9 @@ image_preview_max_px: 640
 # Delete entries older than this duration (e.g. 30d, 12h, 90m).
 # Omit or leave empty to keep entries forever.
 # max_age: 30d
+
+# How often to prune expired entries during `clio watch` (e.g. 3s, 1m).
+prune_interval: 3s
 
 # Action rules: conditions → actions applied to matching clipboard entries.
 # actions:
@@ -257,6 +269,9 @@ image_preview_max_px: 640
         }
         if self.image_preview_max_px <= 0 {
             errors.push("image_preview_max_px must be greater than 0".to_owned());
+        }
+        if self.prune_interval.is_zero() {
+            errors.push("prune_interval must be greater than 0".to_owned());
         }
 
         for rule in &self.actions {

@@ -416,4 +416,25 @@ actions:
         let config: Config = serde_yaml::from_str(&yaml).unwrap();
         assert!(config.actions.is_empty());
     }
+
+    #[test]
+    fn test_prune_interval_default() {
+        let config = Config::default();
+        assert_eq!(config.prune_interval, std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn test_prune_interval_deserialization() {
+        let yaml = "prune_interval: 30s\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.prune_interval, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_validate_prune_interval_zero() {
+        let mut config = Config::default();
+        config.prune_interval = std::time::Duration::ZERO;
+        let errors = config.validate().unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("prune_interval")));
+    }
 }

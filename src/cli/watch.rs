@@ -216,8 +216,7 @@ pub fn run(conn: &Connection, config: &Config) -> anyhow::Result<()> {
         config.watch_interval_ms, config.sync_mode
     );
 
-    let prune_interval = Duration::from_millis(config.watch_interval_ms * 120)
-        .clamp(Duration::from_secs(30), Duration::from_secs(300));
+    let prune_interval = config.prune_interval;
     let state = WatchState {
         conn,
         max_history: config.max_history,
