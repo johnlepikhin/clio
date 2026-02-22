@@ -10,6 +10,7 @@ Clio monitors your clipboard in the background, storing text and image entries i
 - Content deduplication by hash
 - GTK4 history browser with search, thumbnails, and infinite scroll
 - Clipboard sync between PRIMARY and CLIPBOARD selections
+- Action rules: auto-expire secrets, strip tracking params, transform text with external commands
 - Auto-expiration of old entries
 - Headless mode (no GTK4 dependency) for servers and scripts
 - Lightweight: the background watcher (`clio watch`) uses ~1.7 MB of private memory (heap + stack), ~10 MB PSS total including shared GTK4/glib libraries
@@ -146,8 +147,9 @@ clio config init
 | `history_page_size` | `50` | Number of entries loaded per page (infinite scroll) |
 | `image_preview_max_px` | `640` | Maximum thumbnail dimension in pixels (longest side) |
 | `max_age` | none | Auto-expire entries older than this duration |
+| `actions` | `[]` | Action rules for matching entries (see [Action Rules](#action-rules)) |
 
-### Duration format for `max_age`
+### Duration format for `max_age` and `ttl`
 
 The `max_age` field accepts human-readable durations:
 
@@ -157,6 +159,60 @@ The `max_age` field accepts human-readable durations:
 - `30d` — 30 days
 
 Omit `max_age` to keep entries forever.
+
+## Action Rules
+
+Action rules let you automatically process clipboard entries that match certain conditions. Each rule has a name, conditions (matched with AND logic), and actions to apply.
+
+### Conditions
+
+| Field | Description |
+|-------|-------------|
+| `source_app` | Exact match on the application that owns the clipboard (X11 only) |
+| `content_regex` | Regex match against text content (image entries are skipped) |
+
+Both conditions are optional, but at least one is required. When both are present, both must match.
+
+### Actions
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `ttl` | none | Auto-expire the entry after this duration (e.g. `30s`, `5m`) |
+| `command` | none | External command that transforms the text via stdin/stdout |
+| `command_timeout` | `5s` | Kill the command if it exceeds this duration |
+
+When multiple rules match, TTL uses last-match-wins; commands chain sequentially (output of one becomes input to the next). If a command fails, the original text is preserved.
+
+### Example
+
+```yaml
+actions:
+  - name: "Expire passwords quickly"
+    conditions:
+      source_app: "KeePassXC"
+    actions:
+      ttl: "30s"
+
+  - name: "Expire API keys"
+    conditions:
+      content_regex: "^(sk-|ghp_|gho_|ghs_|AKIA|xox[bpas]-|glpat-)[A-Za-z0-9_\\-]+"
+    actions:
+      ttl: "1m"
+
+  - name: "Strip tracking params"
+    conditions:
+      content_regex: "^https?://.*[?&](utm_|fbclid|gclid|msclkid)"
+    actions:
+      command: ["sed", "s/[?&]\\(utm_[^&]*\\|fbclid=[^&]*\\|gclid=[^&]*\\|msclkid=[^&]*\\)//g"]
+
+  - name: "Clean trailing whitespace"
+    conditions:
+      content_regex: "[ \\t]+$"
+    actions:
+      command: ["sed", "s/[[:space:]]*$//"]
+```
+
+Run `clio config init` to generate a config file with more commented-out examples.
 
 ## Clipboard Sync
 
