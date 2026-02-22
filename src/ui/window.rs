@@ -90,8 +90,12 @@ impl WindowState {
                 }
             };
 
-            self.store
-                .append(&EntryObject::new(id, &preview, ct, created, thumbnail));
+            let source_app = entry.source_app.as_deref().unwrap_or("");
+            let expires_at = entry.expires_at.as_deref().unwrap_or("");
+
+            self.store.append(&EntryObject::new(
+                id, &preview, ct, created, thumbnail, source_app, expires_at,
+            ));
         }
     }
 

@@ -1,5 +1,8 @@
+use chrono::{NaiveDateTime, Utc};
 use gtk4::prelude::*;
 use gtk4::{Align, Label, ListItem, Orientation, SignalListItemFactory};
+
+use crate::models::entry::TIMESTAMP_FORMAT;
 
 use super::entry_object::EntryObject;
 
@@ -75,7 +78,30 @@ pub fn create_factory() -> SignalListItemFactory {
             .unwrap();
 
         let ct = entry_obj.content_type();
-        let meta_text = format!("{} | {}", ct, entry_obj.created_at());
+        let mut meta_text = format!("{} | {}", ct, entry_obj.created_at());
+
+        let source_app = entry_obj.source_app();
+        if !source_app.is_empty() {
+            meta_text.push_str(" | ");
+            meta_text.push_str(&source_app);
+        }
+
+        let expires_at = entry_obj.expires_at();
+        if !expires_at.is_empty() {
+            if let Ok(expires) = NaiveDateTime::parse_from_str(&expires_at, TIMESTAMP_FORMAT) {
+                let now = Utc::now().naive_utc();
+                if expires > now {
+                    let remaining = expires - now;
+                    let std_dur =
+                        std::time::Duration::from_secs(remaining.num_seconds().unsigned_abs());
+                    let formatted = humantime::format_duration(std_dur).to_string();
+                    meta_text.push_str(" | expires in ");
+                    meta_text.push_str(&formatted);
+                } else {
+                    meta_text.push_str(" | expired");
+                }
+            }
+        }
 
         if ct == "image" {
             // Image is the preview; hide preview_label, show only meta

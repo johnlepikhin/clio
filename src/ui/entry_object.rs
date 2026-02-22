@@ -22,6 +22,10 @@ mod imp {
         created_at: RefCell<String>,
         #[property(get, set)]
         thumbnail: RefCell<Option<gdk::Texture>>,
+        #[property(get, set)]
+        source_app: RefCell<String>,
+        #[property(get, set)]
+        expires_at: RefCell<String>,
     }
 
     #[glib::object_subclass]
@@ -45,6 +49,8 @@ impl EntryObject {
         content_type: &str,
         created_at: &str,
         thumbnail: Option<gdk::Texture>,
+        source_app: &str,
+        expires_at: &str,
     ) -> Self {
         glib::Object::builder()
             .property("id", id)
@@ -52,6 +58,8 @@ impl EntryObject {
             .property("content-type", content_type)
             .property("created-at", created_at)
             .property("thumbnail", thumbnail)
+            .property("source-app", source_app)
+            .property("expires-at", expires_at)
             .build()
     }
 }
