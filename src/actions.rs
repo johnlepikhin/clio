@@ -26,13 +26,14 @@ pub struct ActionResult {
 pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResult {
     let text = entry.content.text();
     let source_app = entry.source_app.as_deref();
+    let source_title = entry.source_title.as_deref();
     let is_image = matches!(entry.content, EntryContent::Image(_));
 
     let mut ttl: Option<Duration> = None;
     let mut current_text: Option<String> = text.map(|t| t.to_owned());
 
     for rule in rules {
-        if !rule_matches(rule, source_app, current_text.as_deref(), is_image) {
+        if !rule_matches(rule, source_app, current_text.as_deref(), is_image, source_title) {
             continue;
         }
 
@@ -88,6 +89,7 @@ fn rule_matches(
     source_app: Option<&str>,
     text: Option<&str>,
     is_image: bool,
+    source_title: Option<&str>,
 ) -> bool {
     // Check source_app condition
     if let Some(ref expected) = rule.source_app {
@@ -103,6 +105,14 @@ fn rule_matches(
             return false;
         }
         match text {
+            Some(t) if regex.is_match(t) => {}
+            _ => return false,
+        }
+    }
+
+    // Check source_title_regex condition (works for both text and images)
+    if let Some(ref regex) = rule.source_title_regex {
+        match source_title {
             Some(t) if regex.is_match(t) => {}
             _ => return false,
         }
@@ -234,6 +244,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: Some("KeePassXC".into()),
                 content_regex: None,
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: Some(Duration::from_secs(30)),
@@ -256,6 +267,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: Some("KeePassXC".into()),
                 content_regex: None,
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: Some(Duration::from_secs(30)),
@@ -276,6 +288,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: None,
                 content_regex: Some("^sk-".into()),
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: Some(Duration::from_secs(60)),
@@ -296,6 +309,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: None,
                 content_regex: Some("^sk-".into()),
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: Some(Duration::from_secs(60)),
@@ -316,6 +330,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: Some("Firefox".into()),
                 content_regex: Some("^password:".into()),
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: Some(Duration::from_secs(15)),
@@ -336,6 +351,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: Some("Firefox".into()),
                 content_regex: Some("^password:".into()),
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: Some(Duration::from_secs(15)),
@@ -357,6 +373,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: None,
                 content_regex: Some(".*".into()),
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: None,
@@ -377,6 +394,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: None,
                 content_regex: Some(".*".into()),
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: None,
@@ -397,6 +415,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: None,
                 content_regex: Some(".*".into()),
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: None,
@@ -418,6 +437,7 @@ mod tests {
                 conditions: RuleConditions {
                     source_app: None,
                     content_regex: Some(".*".into()),
+                    source_title_regex: None,
                 },
                 actions: RuleActions {
                     ttl: Some(Duration::from_secs(30)),
@@ -430,6 +450,7 @@ mod tests {
                 conditions: RuleConditions {
                     source_app: None,
                     content_regex: Some(".*".into()),
+                    source_title_regex: None,
                 },
                 actions: RuleActions {
                     ttl: Some(Duration::from_secs(60)),
@@ -462,6 +483,7 @@ mod tests {
                 conditions: RuleConditions {
                     source_app: None,
                     content_regex: Some(".*".into()),
+                    source_title_regex: None,
                 },
                 actions: RuleActions {
                     ttl: None,
@@ -474,6 +496,7 @@ mod tests {
                 conditions: RuleConditions {
                     source_app: None,
                     content_regex: Some(".*".into()),
+                    source_title_regex: None,
                 },
                 actions: RuleActions {
                     ttl: None,
@@ -495,6 +518,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: Some("KeePassXC".into()),
                 content_regex: None,
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: Some(Duration::from_secs(30)),
@@ -515,6 +539,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: None,
                 content_regex: Some(".*".into()),
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: Some(Duration::from_secs(30)),
@@ -536,6 +561,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: Some("GIMP".into()),
                 content_regex: None,
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: Some(Duration::from_secs(30)),
@@ -559,6 +585,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: None,
                 content_regex: None,
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: None,
@@ -576,6 +603,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: None,
                 content_regex: Some("[invalid".into()),
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: None,
@@ -593,6 +621,7 @@ mod tests {
             conditions: RuleConditions {
                 source_app: Some("App".into()),
                 content_regex: None,
+                source_title_regex: None,
             },
             actions: RuleActions {
                 ttl: None,
@@ -601,5 +630,96 @@ mod tests {
             },
         };
         assert!(rule.compile().is_err());
+    }
+
+    #[test]
+    fn test_source_title_regex_match() {
+        let rule = compile_rule(&ActionRule {
+            name: "test".into(),
+            conditions: RuleConditions {
+                source_app: None,
+                content_regex: None,
+                source_title_regex: Some("KeePass".into()),
+            },
+            actions: RuleActions {
+                ttl: Some(Duration::from_secs(30)),
+                command: None,
+                command_timeout: None,
+            },
+        });
+
+        let mut entry = text_entry("password123", None);
+        entry.source_title = Some("KeePassXC – Passwords".into());
+        let result = apply_rules(&[rule], &entry);
+        assert!(result.expires_at.is_some());
+        assert_eq!(result.ttl, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn test_source_title_regex_no_match() {
+        let rule = compile_rule(&ActionRule {
+            name: "test".into(),
+            conditions: RuleConditions {
+                source_app: None,
+                content_regex: None,
+                source_title_regex: Some("KeePass".into()),
+            },
+            actions: RuleActions {
+                ttl: Some(Duration::from_secs(30)),
+                command: None,
+                command_timeout: None,
+            },
+        });
+
+        let mut entry = text_entry("hello", None);
+        entry.source_title = Some("Mozilla Firefox".into());
+        let result = apply_rules(&[rule], &entry);
+        assert!(result.expires_at.is_none());
+    }
+
+    #[test]
+    fn test_source_title_none_skips() {
+        let rule = compile_rule(&ActionRule {
+            name: "test".into(),
+            conditions: RuleConditions {
+                source_app: None,
+                content_regex: None,
+                source_title_regex: Some("KeePass".into()),
+            },
+            actions: RuleActions {
+                ttl: Some(Duration::from_secs(30)),
+                command: None,
+                command_timeout: None,
+            },
+        });
+
+        let entry = text_entry("password", None);
+        assert!(entry.source_title.is_none());
+        let result = apply_rules(&[rule], &entry);
+        assert!(result.expires_at.is_none());
+    }
+
+    #[test]
+    fn test_source_title_images_match() {
+        let rule = compile_rule(&ActionRule {
+            name: "test".into(),
+            conditions: RuleConditions {
+                source_app: None,
+                content_regex: None,
+                source_title_regex: Some("GIMP".into()),
+            },
+            actions: RuleActions {
+                ttl: Some(Duration::from_secs(60)),
+                command: None,
+                command_timeout: None,
+            },
+        });
+
+        let rgba = vec![255u8; 4 * 2 * 2];
+        let mut entry = ClipboardEntry::from_image(2, 2, rgba, None).unwrap();
+        entry.source_title = Some("GIMP – image.png".into());
+        let result = apply_rules(&[rule], &entry);
+        assert!(result.expires_at.is_some());
+        assert_eq!(result.ttl, Some(Duration::from_secs(60)));
     }
 }

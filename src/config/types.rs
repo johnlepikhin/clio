@@ -34,6 +34,7 @@ impl fmt::Display for SyncMode {
 pub struct RuleConditions {
     pub source_app: Option<String>,
     pub content_regex: Option<String>,
+    pub source_title_regex: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +59,7 @@ pub struct CompiledRule {
     pub name: String,
     pub source_app: Option<String>,
     pub content_regex: Option<Regex>,
+    pub source_title_regex: Option<Regex>,
     pub ttl: Option<Duration>,
     pub command: Option<Vec<String>>,
     pub command_timeout: Duration,
@@ -74,9 +76,12 @@ fn default_prune_interval() -> Duration {
 impl ActionRule {
     /// Validate and compile this rule. Returns error messages for invalid rules.
     pub fn compile(&self) -> Result<CompiledRule, String> {
-        if self.conditions.source_app.is_none() && self.conditions.content_regex.is_none() {
+        if self.conditions.source_app.is_none()
+            && self.conditions.content_regex.is_none()
+            && self.conditions.source_title_regex.is_none()
+        {
             return Err(format!(
-                "rule '{}': at least one condition (source_app or content_regex) is required",
+                "rule '{}': at least one condition (source_app, content_regex, or source_title_regex) is required",
                 self.name
             ));
         }
@@ -86,6 +91,19 @@ impl ActionRule {
                 Ok(re) => Some(re),
                 Err(e) => {
                     return Err(format!("rule '{}': invalid regex '{}': {}", self.name, pattern, e));
+                }
+            },
+            None => None,
+        };
+
+        let source_title_regex = match &self.conditions.source_title_regex {
+            Some(pattern) => match Regex::new(pattern) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    return Err(format!(
+                        "rule '{}': invalid source_title_regex '{}': {}",
+                        self.name, pattern, e
+                    ));
                 }
             },
             None => None,
@@ -101,6 +119,7 @@ impl ActionRule {
             name: self.name.clone(),
             source_app: self.conditions.source_app.clone(),
             content_regex,
+            source_title_regex,
             ttl: self.actions.ttl,
             command: self.actions.command.clone(),
             command_timeout: self.actions.command_timeout.unwrap_or(DEFAULT_COMMAND_TIMEOUT),
@@ -237,6 +256,12 @@ prune_interval: 3s
 #     actions:
 #       command: ["sed", "s/[[:space:]]*$//"]
 #       command_timeout: "5s"
+#
+#   - name: "Expire banking site copies"
+#     conditions:
+#       source_title_regex: "(?i)(bank|banking|chase\\.com|wells\\s*fargo)"
+#     actions:
+#       ttl: "1m"
 "#
         .to_owned()
     }

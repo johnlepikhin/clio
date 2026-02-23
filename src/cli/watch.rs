@@ -74,9 +74,12 @@ impl WatchState<'_> {
     /// Build a ClipboardEntry from content, or None if empty.
     /// Rejects oversized images early (before PNG encoding) based on RGBA size.
     fn build_entry(&self, content: ClipboardContent) -> Option<ClipboardEntry> {
+        let info = source_app::detect_source_app();
         match content {
             ClipboardContent::Text(t) => {
-                Some(ClipboardEntry::from_text(t, source_app::detect_source_app()))
+                let mut entry = ClipboardEntry::from_text(t, info.class);
+                entry.source_title = info.title;
+                Some(entry)
             }
             ClipboardContent::Image {
                 width,
@@ -91,7 +94,9 @@ impl WatchState<'_> {
                     );
                     return None;
                 }
-                ClipboardEntry::from_image(width, height, rgba_bytes, source_app::detect_source_app()).ok()
+                let mut entry = ClipboardEntry::from_image(width, height, rgba_bytes, info.class).ok()?;
+                entry.source_title = info.title;
+                Some(entry)
             }
             ClipboardContent::Empty => None,
         }

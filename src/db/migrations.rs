@@ -30,6 +30,7 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
                 ON clipboard_entries(expires_at)
                 WHERE expires_at IS NOT NULL;",
         ),
+        M::up("ALTER TABLE clipboard_entries ADD COLUMN source_title TEXT;"),
     ]);
     migrations.to_latest(conn)?;
     Ok(())

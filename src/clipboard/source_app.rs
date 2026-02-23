@@ -1,15 +1,22 @@
-/// Best-effort source application detection.
-/// Returns the WM_CLASS of the active window on X11.
+/// Source application info: WM_CLASS and window title.
+///
+/// Best-effort detection: reads from the active window on X11.
 /// Falls back to clipboard owner if active window detection fails.
-/// Returns None on Wayland or if detection fails.
-#[cfg(all(target_os = "linux", feature = "x11-source-app"))]
-pub fn detect_source_app() -> Option<String> {
-    active_window_class().or_else(clipboard_owner_class)
+/// Returns default (None, None) on Wayland or if detection fails.
+#[derive(Debug, Default, Clone)]
+pub struct SourceInfo {
+    pub class: Option<String>,
+    pub title: Option<String>,
 }
 
-/// Primary strategy: read WM_CLASS from _NET_ACTIVE_WINDOW.
 #[cfg(all(target_os = "linux", feature = "x11-source-app"))]
-fn active_window_class() -> Option<String> {
+pub fn detect_source_app() -> SourceInfo {
+    active_window_info().unwrap_or_else(|| clipboard_owner_info().unwrap_or_default())
+}
+
+/// Primary strategy: read WM_CLASS and title from _NET_ACTIVE_WINDOW.
+#[cfg(all(target_os = "linux", feature = "x11-source-app"))]
+fn active_window_info() -> Option<SourceInfo> {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
 
@@ -34,8 +41,18 @@ fn active_window_class() -> Option<String> {
         return None;
     }
 
-    // Try WM_CLASS on the active window, then traverse parents
-    wm_class_with_traversal(&conn, window)
+    // Read title from the original top-level window
+    let title = read_window_title(&conn, window);
+
+    // WM_CLASS may be on the window itself or a parent
+    let class = wm_class_with_traversal(&conn, window);
+
+    // Return info only if at least class was found
+    if class.is_some() || title.is_some() {
+        Some(SourceInfo { class, title })
+    } else {
+        None
+    }
 }
 
 /// Read WM_CLASS from `window`, walking up the parent chain (up to 10 levels).
@@ -76,9 +93,62 @@ fn read_wm_class(
     Some(class.to_string())
 }
 
-/// Fallback: read WM_CLASS from the clipboard selection owner.
+/// Read window title: try _NET_WM_NAME (UTF8_STRING) first, fall back to WM_NAME.
 #[cfg(all(target_os = "linux", feature = "x11-source-app"))]
-fn clipboard_owner_class() -> Option<String> {
+fn read_window_title(
+    conn: &impl x11rb::protocol::xproto::ConnectionExt,
+    window: u32,
+) -> Option<String> {
+    // Try _NET_WM_NAME first (UTF-8)
+    let net_wm_name_atom = conn
+        .intern_atom(false, b"_NET_WM_NAME")
+        .ok()?
+        .reply()
+        .ok()?
+        .atom;
+    let utf8_string_atom = conn
+        .intern_atom(false, b"UTF8_STRING")
+        .ok()?
+        .reply()
+        .ok()?
+        .atom;
+
+    let reply = conn
+        .get_property(false, window, net_wm_name_atom, utf8_string_atom, 0, 1024)
+        .ok()?
+        .reply()
+        .ok()?;
+
+    if reply.value_len > 0 {
+        let title = std::str::from_utf8(&reply.value).ok()?;
+        if !title.is_empty() {
+            return Some(title.to_string());
+        }
+    }
+
+    // Fallback: WM_NAME (STRING encoding)
+    use x11rb::protocol::xproto::AtomEnum;
+    let wm_name_atom: u32 = AtomEnum::WM_NAME.into();
+    let string_atom: u32 = AtomEnum::STRING.into();
+    let reply = conn
+        .get_property(false, window, wm_name_atom, string_atom, 0, 1024)
+        .ok()?
+        .reply()
+        .ok()?;
+
+    if reply.value_len > 0 {
+        let title = std::str::from_utf8(&reply.value).ok()?;
+        if !title.is_empty() {
+            return Some(title.to_string());
+        }
+    }
+
+    None
+}
+
+/// Fallback: read WM_CLASS and title from the clipboard selection owner.
+#[cfg(all(target_os = "linux", feature = "x11-source-app"))]
+fn clipboard_owner_info() -> Option<SourceInfo> {
     use x11rb::protocol::xproto::ConnectionExt;
 
     let (conn, _) = x11rb::connect(None).ok()?;
@@ -97,10 +167,16 @@ fn clipboard_owner_class() -> Option<String> {
     if owner == 0 {
         return None;
     }
-    read_wm_class(&conn, owner)
+    let class = read_wm_class(&conn, owner);
+    let title = read_window_title(&conn, owner);
+    if class.is_some() || title.is_some() {
+        Some(SourceInfo { class, title })
+    } else {
+        None
+    }
 }
 
 #[cfg(not(all(target_os = "linux", feature = "x11-source-app")))]
-pub fn detect_source_app() -> Option<String> {
-    None
+pub fn detect_source_app() -> SourceInfo {
+    SourceInfo::default()
 }
