@@ -25,6 +25,8 @@ mod imp {
         #[property(get, set)]
         source_app: RefCell<String>,
         #[property(get, set)]
+        source_title: RefCell<String>,
+        #[property(get, set)]
         expires_at: RefCell<String>,
     }
 
@@ -43,6 +45,7 @@ glib::wrapper! {
 }
 
 impl EntryObject {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: i64,
         preview_text: &str,
@@ -50,6 +53,7 @@ impl EntryObject {
         created_at: &str,
         thumbnail: Option<gdk::Texture>,
         source_app: &str,
+        source_title: &str,
         expires_at: &str,
     ) -> Self {
         glib::Object::builder()
@@ -59,6 +63,7 @@ impl EntryObject {
             .property("created-at", created_at)
             .property("thumbnail", thumbnail)
             .property("source-app", source_app)
+            .property("source-title", source_title)
             .property("expires-at", expires_at)
             .build()
     }
