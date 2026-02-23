@@ -32,9 +32,9 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Show => cli::show::run(),
-        Commands::Copy { ttl } => {
+        Commands::Copy { ttl, mask_with } => {
             let conn = db::init_db(&db_path).context("failed to initialize database")?;
-            cli::copy::run(&conn, &config, ttl)
+            cli::copy::run(&conn, &config, ttl, mask_with)
         }
         Commands::Watch => {
             let conn = db::init_db(&db_path).context("failed to initialize database")?;

@@ -11,7 +11,12 @@ use crate::db::repository;
 use crate::models::entry::TIMESTAMP_FORMAT;
 use crate::models::ClipboardEntry;
 
-pub fn run(conn: &Connection, config: &Config, ttl: Option<Duration>) -> anyhow::Result<()> {
+pub fn run(
+    conn: &Connection,
+    config: &Config,
+    ttl: Option<Duration>,
+    mask_with: Option<String>,
+) -> anyhow::Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
 
@@ -21,6 +26,8 @@ pub fn run(conn: &Connection, config: &Config, ttl: Option<Duration>) -> anyhow:
 
     clipboard::write_clipboard_text_sync(&input)?;
     let mut entry = ClipboardEntry::from_text(input, None);
+
+    entry.mask_text = mask_with;
 
     entry.expires_at = ttl.map(|d| {
         let chrono_d = match chrono::Duration::from_std(d) {

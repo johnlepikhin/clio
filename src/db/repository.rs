@@ -13,8 +13,8 @@ fn escape_like(query: &str) -> String {
 
 pub fn insert_entry(conn: &Connection, entry: &ClipboardEntry) -> Result<i64> {
     let mut stmt = conn.prepare_cached(
-        "INSERT INTO clipboard_entries (content_type, text_content, blob_content, content_hash, source_app, source_title, metadata, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO clipboard_entries (content_type, text_content, blob_content, content_hash, source_app, source_title, metadata, expires_at, mask_text)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )?;
     stmt.execute(params![
         entry.content.content_type().as_str(),
@@ -25,13 +25,14 @@ pub fn insert_entry(conn: &Connection, entry: &ClipboardEntry) -> Result<i64> {
         entry.source_title,
         entry.metadata.as_deref().unwrap_or("{}"),
         entry.expires_at,
+        entry.mask_text,
     ])?;
     Ok(conn.last_insert_rowid())
 }
 
 pub fn find_by_hash(conn: &Connection, hash: &[u8]) -> Result<Option<ClipboardEntry>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at, mask_text
          FROM clipboard_entries WHERE content_hash = ?1",
     )?;
     let mut rows = stmt.query(params![hash])?;
@@ -55,21 +56,25 @@ pub fn update_timestamp_and_expiry(
 
 /// Update entry on dedup: refresh timestamp, COALESCE expires_at, source_app, and source_title.
 /// None means "keep existing value", Some means "overwrite".
+/// Exception: mask_text is always overwritten (not COALESCEd) so that stale masks
+/// don't persist when a rule no longer matches.
 fn update_on_dedup(
     conn: &Connection,
     id: i64,
     expires_at: Option<&str>,
     source_app: Option<&str>,
     source_title: Option<&str>,
+    mask_text: Option<&str>,
 ) -> Result<()> {
     conn.execute(
         "UPDATE clipboard_entries
          SET created_at = strftime('%Y-%m-%dT%H:%M:%f', 'now'),
              expires_at = COALESCE(?2, expires_at),
              source_app = COALESCE(?3, source_app),
-             source_title = COALESCE(?4, source_title)
+             source_title = COALESCE(?4, source_title),
+             mask_text = ?5
          WHERE id = ?1",
-        params![id, expires_at, source_app, source_title],
+        params![id, expires_at, source_app, source_title, mask_text],
     )?;
     Ok(())
 }
@@ -77,7 +82,7 @@ fn update_on_dedup(
 #[cfg(test)]
 pub fn list_entries(conn: &Connection, limit: usize) -> Result<Vec<ClipboardEntry>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at, mask_text
          FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit as i64], row_to_entry)?;
@@ -91,7 +96,7 @@ pub fn list_entries_page(
     offset: usize,
 ) -> Result<Vec<ClipboardEntry>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at, mask_text
          FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt.query_map(params![limit as i64, offset as i64], row_to_entry)?;
@@ -112,7 +117,7 @@ pub fn list_entries_preview(
     let mut stmt = conn.prepare_cached(
         "SELECT id, content_type,
                 CASE WHEN content_type = 'text' THEN substr(text_content, 1, ?3) ELSE text_content END,
-                blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at
+                blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at, mask_text
          FROM clipboard_entries ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt.query_map(
@@ -131,7 +136,7 @@ pub fn search_entries_page(
 ) -> Result<Vec<ClipboardEntry>> {
     let pattern = format!("%{}%", escape_like(query));
     let mut stmt = conn.prepare_cached(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at, mask_text
          FROM clipboard_entries
          WHERE text_content LIKE ?1 ESCAPE '\\'
          ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
@@ -158,7 +163,7 @@ pub fn search_entries_preview(
     let mut stmt = conn.prepare_cached(
         "SELECT id, content_type,
                 CASE WHEN content_type = 'text' THEN substr(text_content, 1, ?4) ELSE text_content END,
-                blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at
+                blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at, mask_text
          FROM clipboard_entries
          WHERE text_content LIKE ?1 ESCAPE '\\'
          ORDER BY created_at DESC LIMIT ?2 OFFSET ?3",
@@ -177,7 +182,7 @@ pub fn delete_entry(conn: &Connection, id: i64) -> Result<()> {
 
 pub fn get_entry_content(conn: &Connection, id: i64) -> Result<Option<ClipboardEntry>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at, mask_text
          FROM clipboard_entries WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![id])?;
@@ -234,7 +239,7 @@ pub fn prune_expired(conn: &Connection, max_age: Option<Duration>) -> Result<u64
 pub fn get_latest_active(conn: &Connection) -> Result<Option<ClipboardEntry>> {
     let now_str = Utc::now().format(TIMESTAMP_FORMAT).to_string();
     let mut stmt = conn.prepare_cached(
-        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at
+        "SELECT id, content_type, text_content, blob_content, content_hash, source_app, source_title, created_at, metadata, expires_at, mask_text
          FROM clipboard_entries
          WHERE expires_at IS NULL OR expires_at >= ?1
          ORDER BY created_at DESC LIMIT 1",
@@ -259,7 +264,7 @@ pub fn save_or_update(
         let id = existing
             .id
             .ok_or(AppError::Database(rusqlite::Error::QueryReturnedNoRows))?;
-        update_on_dedup(conn, id, entry.expires_at.as_deref(), entry.source_app.as_deref(), entry.source_title.as_deref())?;
+        update_on_dedup(conn, id, entry.expires_at.as_deref(), entry.source_app.as_deref(), entry.source_title.as_deref(), entry.mask_text.as_deref())?;
         return Ok(id);
     }
     let id = insert_entry(conn, entry)?;
@@ -306,6 +311,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClipboardEntry> {
         created_at: row.get(7)?,
         metadata: row.get(8)?,
         expires_at: row.get(9)?,
+        mask_text: row.get(10)?,
     })
 }
 
@@ -750,6 +756,50 @@ mod tests {
         let found = get_entry_content(&conn, id).unwrap().unwrap();
         assert_eq!(found.source_title.as_deref(), Some("GitHub - Mozilla Firefox"));
         assert_eq!(found.source_app.as_deref(), Some("Firefox"));
+    }
+
+    #[test]
+    fn test_dedup_updates_mask_text() {
+        let conn = setup();
+
+        let mut entry1 = ClipboardEntry::from_text("secret".to_string(), None);
+        entry1.mask_text = Some("••••••".to_string());
+        let id1 = save_or_update(&conn, &entry1, 500, None).unwrap();
+
+        let found1 = get_entry_content(&conn, id1).unwrap().unwrap();
+        assert_eq!(found1.mask_text.as_deref(), Some("••••••"));
+
+        // Same content with a different mask
+        let mut entry2 = ClipboardEntry::from_text("secret".to_string(), None);
+        entry2.mask_text = Some("***".to_string());
+        let id2 = save_or_update(&conn, &entry2, 500, None).unwrap();
+
+        assert_eq!(id1, id2);
+        let found2 = get_entry_content(&conn, id2).unwrap().unwrap();
+        assert_eq!(found2.mask_text.as_deref(), Some("***"));
+    }
+
+    #[test]
+    fn test_dedup_clears_mask_text_when_new_is_none() {
+        let conn = setup();
+
+        // First save with mask
+        let mut entry1 = ClipboardEntry::from_text("secret".to_string(), None);
+        entry1.mask_text = Some("••••••".to_string());
+        let id1 = save_or_update(&conn, &entry1, 500, None).unwrap();
+
+        let found1 = get_entry_content(&conn, id1).unwrap().unwrap();
+        assert_eq!(found1.mask_text.as_deref(), Some("••••••"));
+
+        // Same content without mask (rule no longer matches)
+        let entry2 = ClipboardEntry::from_text("secret".to_string(), None);
+        assert!(entry2.mask_text.is_none());
+        let id2 = save_or_update(&conn, &entry2, 500, None).unwrap();
+
+        assert_eq!(id1, id2);
+        // Mask must be cleared, not preserved
+        let found2 = get_entry_content(&conn, id2).unwrap().unwrap();
+        assert!(found2.mask_text.is_none());
     }
 
     #[test]

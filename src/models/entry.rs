@@ -83,6 +83,7 @@ pub struct ClipboardEntry {
     pub created_at: Option<String>,
     pub metadata: Option<String>,
     pub expires_at: Option<String>,
+    pub mask_text: Option<String>,
 }
 
 impl ClipboardEntry {
@@ -97,6 +98,7 @@ impl ClipboardEntry {
             created_at: None,
             metadata: None,
             expires_at: None,
+            mask_text: None,
         }
     }
 
@@ -117,6 +119,7 @@ impl ClipboardEntry {
             created_at: None,
             metadata: None,
             expires_at: None,
+            mask_text: None,
         })
     }
 

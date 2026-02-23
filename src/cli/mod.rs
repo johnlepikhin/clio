@@ -30,6 +30,9 @@ pub enum Commands {
         /// Entry time-to-live (e.g. "30s", "5m", "1h")
         #[arg(long, value_parser = parse_duration)]
         ttl: Option<Duration>,
+        /// Mask text shown in history UI instead of real content
+        #[arg(long)]
+        mask_with: Option<String>,
     },
     /// Watch clipboard for changes
     Watch,

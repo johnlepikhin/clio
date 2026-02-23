@@ -82,11 +82,17 @@ pub fn create_factory() -> SignalListItemFactory {
         let ct = entry_obj.content_type();
         let meta_text = build_meta_text(&entry_obj);
 
-        if ct == "image" {
+        let mask = entry_obj.mask_text();
+        if !mask.is_empty() {
+            // Mask overrides both text and image display
+            thumbnail.set_paintable(gtk4::gdk::Paintable::NONE);
+            thumbnail.set_size_request(-1, -1);
+            thumbnail.set_visible(false);
+            preview_label.set_text(&mask);
+            preview_label.set_visible(true);
+        } else if ct == "image" {
             preview_label.set_text("");
             preview_label.set_visible(false);
-            meta_label.set_text(&meta_text);
-            meta_label.set_visible(true);
         } else {
             let display_text = if ct == "text" {
                 entry_obj.preview_text().to_string()
@@ -95,9 +101,9 @@ pub fn create_factory() -> SignalListItemFactory {
             };
             preview_label.set_text(&display_text);
             preview_label.set_visible(true);
-            meta_label.set_text(&meta_text);
-            meta_label.set_visible(true);
         }
+        meta_label.set_text(&meta_text);
+        meta_label.set_visible(true);
 
         // Live update: refresh "expires in" when timer emits notify::expires-at
         let label_clone = meta_label.clone();

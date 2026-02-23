@@ -118,6 +118,7 @@ impl WatchState<'_> {
         }
 
         entry.expires_at = result.expires_at;
+        entry.mask_text = result.mask_with;
         result.ttl
     }
 

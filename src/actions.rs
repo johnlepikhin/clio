@@ -18,6 +18,8 @@ pub struct ActionResult {
     pub expires_at: Option<String>,
     /// Original TTL duration from the matching rule (for expiry tracking).
     pub ttl: Option<Duration>,
+    /// Mask text to display instead of real content in history UI.
+    pub mask_with: Option<String>,
 }
 
 /// Evaluate all rules against an entry and apply matching actions.
@@ -30,6 +32,7 @@ pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResu
     let is_image = matches!(entry.content, EntryContent::Image(_));
 
     let mut ttl: Option<Duration> = None;
+    let mut mask_with: Option<String> = None;
     let mut current_text: Option<String> = text.map(|t| t.to_owned());
 
     for rule in rules {
@@ -40,6 +43,11 @@ pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResu
         // Apply TTL action (last match wins)
         if let Some(rule_ttl) = rule.ttl {
             ttl = Some(rule_ttl);
+        }
+
+        // Apply mask_with action (last match wins)
+        if let Some(ref m) = rule.mask_with {
+            mask_with = Some(m.clone());
         }
 
         // Apply command action (only for text entries)
@@ -81,6 +89,7 @@ pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResu
         transformed_text,
         expires_at,
         ttl,
+        mask_with,
     }
 }
 
@@ -250,6 +259,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(30)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -273,6 +283,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(30)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -294,6 +305,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(60)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -315,6 +327,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(60)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -336,6 +349,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(15)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -357,6 +371,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(15)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -379,6 +394,7 @@ mod tests {
                 ttl: None,
                 command: Some(vec!["tr".into(), "a-z".into(), "A-Z".into()]),
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -400,6 +416,7 @@ mod tests {
                 ttl: None,
                 command: Some(vec!["false".into()]),
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -421,6 +438,7 @@ mod tests {
                 ttl: None,
                 command: Some(vec!["nonexistent_binary_xyz".into()]),
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -443,6 +461,7 @@ mod tests {
                     ttl: Some(Duration::from_secs(30)),
                     command: None,
                     command_timeout: None,
+                    mask_with: None,
                 },
             }),
             compile_rule(&ActionRule {
@@ -456,6 +475,7 @@ mod tests {
                     ttl: Some(Duration::from_secs(60)),
                     command: None,
                     command_timeout: None,
+                    mask_with: None,
                 },
             }),
         ];
@@ -489,6 +509,7 @@ mod tests {
                     ttl: None,
                     command: Some(vec!["tr".into(), "a-z".into(), "A-Z".into()]),
                     command_timeout: None,
+                    mask_with: None,
                 },
             }),
             compile_rule(&ActionRule {
@@ -502,6 +523,7 @@ mod tests {
                     ttl: None,
                     command: Some(vec!["rev".into()]),
                     command_timeout: None,
+                    mask_with: None,
                 },
             }),
         ];
@@ -524,6 +546,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(30)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -545,6 +568,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(30)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -567,6 +591,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(30)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -591,6 +616,7 @@ mod tests {
                 ttl: None,
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         };
         assert!(rule.compile().is_err());
@@ -609,6 +635,7 @@ mod tests {
                 ttl: None,
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         };
         assert!(rule.compile().is_err());
@@ -627,6 +654,7 @@ mod tests {
                 ttl: None,
                 command: Some(vec![]),
                 command_timeout: None,
+                mask_with: None,
             },
         };
         assert!(rule.compile().is_err());
@@ -645,6 +673,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(30)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -668,6 +697,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(30)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -690,6 +720,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(30)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 
@@ -697,6 +728,89 @@ mod tests {
         assert!(entry.source_title.is_none());
         let result = apply_rules(&[rule], &entry);
         assert!(result.expires_at.is_none());
+    }
+
+    #[test]
+    fn test_mask_with_applied() {
+        let rule = compile_rule(&ActionRule {
+            name: "mask".into(),
+            conditions: RuleConditions {
+                source_app: Some("KeePassXC".into()),
+                content_regex: None,
+                source_title_regex: None,
+            },
+            actions: RuleActions {
+                ttl: None,
+                command: None,
+                command_timeout: None,
+                mask_with: Some("***".into()),
+            },
+        });
+
+        let entry = text_entry("secret-password", Some("KeePassXC"));
+        let result = apply_rules(&[rule], &entry);
+        assert_eq!(result.mask_with.as_deref(), Some("***"));
+        assert!(result.transformed_text.is_none());
+    }
+
+    #[test]
+    fn test_mask_with_last_wins() {
+        let rules: Vec<CompiledRule> = vec![
+            compile_rule(&ActionRule {
+                name: "mask1".into(),
+                conditions: RuleConditions {
+                    source_app: None,
+                    content_regex: Some(".*".into()),
+                    source_title_regex: None,
+                },
+                actions: RuleActions {
+                    ttl: None,
+                    command: None,
+                    command_timeout: None,
+                    mask_with: Some("***".into()),
+                },
+            }),
+            compile_rule(&ActionRule {
+                name: "mask2".into(),
+                conditions: RuleConditions {
+                    source_app: None,
+                    content_regex: Some(".*".into()),
+                    source_title_regex: None,
+                },
+                actions: RuleActions {
+                    ttl: None,
+                    command: None,
+                    command_timeout: None,
+                    mask_with: Some("••••••".into()),
+                },
+            }),
+        ];
+
+        let entry = text_entry("hello", None);
+        let result = apply_rules(&rules, &entry);
+        assert_eq!(result.mask_with.as_deref(), Some("••••••"));
+    }
+
+    #[test]
+    fn test_mask_with_no_match() {
+        let rule = compile_rule(&ActionRule {
+            name: "mask".into(),
+            conditions: RuleConditions {
+                source_app: Some("KeePassXC".into()),
+                content_regex: None,
+                source_title_regex: None,
+            },
+            actions: RuleActions {
+                ttl: None,
+                command: None,
+                command_timeout: None,
+                mask_with: Some("***".into()),
+            },
+        });
+
+        let entry = text_entry("hello", Some("Firefox"));
+        let result = apply_rules(&[rule], &entry);
+        assert!(result.mask_with.is_none());
     }
 
     #[test]
@@ -712,6 +826,7 @@ mod tests {
                 ttl: Some(Duration::from_secs(60)),
                 command: None,
                 command_timeout: None,
+                mask_with: None,
             },
         });
 

@@ -82,6 +82,17 @@ echo "hello" | clio copy
 cat file.txt | clio copy
 ```
 
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--ttl <DURATION>` | Auto-expire the entry after this duration (e.g. `30s`, `5m`, `1h`) |
+| `--mask-with <TEXT>` | Display this text instead of real content in history UI |
+
+```bash
+echo "secret" | clio copy --ttl 30s --mask-with "••••••"
+```
+
 ### `clio watch`
 
 Start the background clipboard watcher. Polls the clipboard at a configurable interval and saves new entries to the database.
@@ -181,8 +192,9 @@ All conditions are optional, but at least one is required. When multiple are pre
 | `ttl` | none | Auto-expire the entry after this duration (e.g. `30s`, `5m`) |
 | `command` | none | External command that transforms the text via stdin/stdout |
 | `command_timeout` | `5s` | Kill the command if it exceeds this duration |
+| `mask_with` | none | Display this text instead of real content in history UI |
 
-When multiple rules match, TTL uses last-match-wins; commands chain sequentially (output of one becomes input to the next). If a command fails, the original text is preserved.
+When multiple rules match, TTL and `mask_with` use last-match-wins; commands chain sequentially (output of one becomes input to the next). If a command fails, the original text is preserved. The `mask_with` action only affects display — the real text is stored in the database and restored to the clipboard when the entry is selected.
 
 ### Example
 
@@ -217,6 +229,13 @@ actions:
       source_title_regex: "GitHub"
     actions:
       ttl: "2m"
+
+  - name: "Mask passwords"
+    conditions:
+      source_app: "KeePassXC"
+    actions:
+      ttl: "30s"
+      mask_with: "••••••"
 ```
 
 Run `clio config init` to generate a config file with more commented-out examples.

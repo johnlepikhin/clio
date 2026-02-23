@@ -115,9 +115,10 @@ impl WindowState {
             let source_app = entry.source_app.as_deref().unwrap_or("");
             let source_title = entry.source_title.as_deref().unwrap_or("");
             let expires_at = entry.expires_at.as_deref().unwrap_or("");
+            let mask_text = entry.mask_text.as_deref().unwrap_or("");
 
             self.store.append(&EntryObject::new(
-                id, &preview, ct, created, thumbnail, source_app, source_title, expires_at,
+                id, &preview, ct, created, thumbnail, source_app, source_title, expires_at, mask_text,
             ));
         }
     }

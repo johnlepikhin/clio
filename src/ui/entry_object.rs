@@ -28,6 +28,8 @@ mod imp {
         source_title: RefCell<String>,
         #[property(get, set)]
         expires_at: RefCell<String>,
+        #[property(get, set)]
+        mask_text: RefCell<String>,
     }
 
     #[glib::object_subclass]
@@ -55,6 +57,7 @@ impl EntryObject {
         source_app: &str,
         source_title: &str,
         expires_at: &str,
+        mask_text: &str,
     ) -> Self {
         glib::Object::builder()
             .property("id", id)
@@ -65,6 +68,7 @@ impl EntryObject {
             .property("source-app", source_app)
             .property("source-title", source_title)
             .property("expires-at", expires_at)
+            .property("mask-text", mask_text)
             .build()
     }
 }

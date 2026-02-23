@@ -44,6 +44,7 @@ pub struct RuleActions {
     pub command: Option<Vec<String>>,
     #[serde(with = "humantime_serde::option", default)]
     pub command_timeout: Option<Duration>,
+    pub mask_with: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +64,7 @@ pub struct CompiledRule {
     pub ttl: Option<Duration>,
     pub command: Option<Vec<String>>,
     pub command_timeout: Duration,
+    pub mask_with: Option<String>,
 }
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -123,6 +125,7 @@ impl ActionRule {
             ttl: self.actions.ttl,
             command: self.actions.command.clone(),
             command_timeout: self.actions.command_timeout.unwrap_or(DEFAULT_COMMAND_TIMEOUT),
+            mask_with: self.actions.mask_with.clone(),
         })
     }
 }
@@ -262,6 +265,13 @@ prune_interval: 3s
 #       source_title_regex: "(?i)(bank|banking|chase\\.com|wells\\s*fargo)"
 #     actions:
 #       ttl: "1m"
+#
+#   - name: "Mask passwords"
+#     conditions:
+#       source_app: "KeePassXC"
+#     actions:
+#       ttl: "30s"
+#       mask_with: "••••••"
 "#
         .to_owned()
     }
@@ -319,9 +329,9 @@ prune_interval: 3s
         for rule in &self.actions {
             match rule.compile() {
                 Ok(r) => {
-                    if r.ttl.is_none() && r.command.is_none() {
+                    if r.ttl.is_none() && r.command.is_none() && r.mask_with.is_none() {
                         eprintln!(
-                            "warning: skipping rule '{}': no actions (no ttl or command)",
+                            "warning: skipping rule '{}': no actions (no ttl, command, or mask_with)",
                             r.name
                         );
                         continue;
