@@ -170,8 +170,9 @@ Action rules let you automatically process clipboard entries that match certain 
 |-------|-------------|
 | `source_app` | Exact match on the application that owns the clipboard (X11 only) |
 | `content_regex` | Regex match against text content (image entries are skipped) |
+| `source_title_regex` | Regex match against the window title of the source application (X11 only) |
 
-Both conditions are optional, but at least one is required. When both are present, both must match.
+All conditions are optional, but at least one is required. When multiple are present, all must match.
 
 ### Actions
 
@@ -210,6 +211,12 @@ actions:
       content_regex: "[ \\t]+$"
     actions:
       command: ["sed", "s/[[:space:]]*$//"]
+
+  - name: "Short-lived GitHub tokens"
+    conditions:
+      source_title_regex: "GitHub"
+    actions:
+      ttl: "2m"
 ```
 
 Run `clio config init` to generate a config file with more commented-out examples.
