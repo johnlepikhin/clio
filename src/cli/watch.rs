@@ -9,13 +9,14 @@ use rusqlite::Connection;
 use arboard::LinuxClipboardKind;
 
 use anyhow::Context;
+use chrono::{NaiveDateTime, Utc};
 
 use crate::actions;
 use crate::clipboard::source_app;
 use crate::clipboard::{self, ClipboardContent};
 use crate::config::{CompiledRule, Config, SyncMode};
 use crate::db::repository;
-use crate::models::entry::{compute_hash, ClipboardEntry, ContentHash, EntryContent};
+use crate::models::entry::{compute_hash, ClipboardEntry, ContentHash, EntryContent, TIMESTAMP_FORMAT};
 
 /// Ask glibc to return free heap pages to the OS.
 /// Cost: ~1μs per call. Prevents RSS growth from transient allocations.
@@ -148,12 +149,37 @@ impl WatchState<'_> {
         }
     }
 
+    /// If no TTL came from action rules, check if the DB entry has an `expires_at`
+    /// (e.g. set by `clio copy --ttl`) and pick it up for clipboard clearing.
+    fn pick_up_db_expiry(&self, content_hash: &ContentHash) -> Option<Duration> {
+        let entry = repository::find_by_hash(self.conn, content_hash)
+            .inspect_err(|e| eprintln!("error looking up expiry: {e}"))
+            .ok()??;
+        let expires_str = entry.expires_at.as_deref()?;
+        let expires = NaiveDateTime::parse_from_str(expires_str, TIMESTAMP_FORMAT).ok()?;
+        let now = Utc::now().naive_utc();
+        if expires > now {
+            let remaining = (expires - now).to_std().ok()?;
+            Some(remaining)
+        } else {
+            Some(Duration::ZERO)
+        }
+    }
+
+    /// Apply actions, save to DB, pick up DB expiry if needed, and update tracking.
+    fn apply_save_and_track(&self, entry: &mut ClipboardEntry) {
+        let mut ttl = self.apply_actions(entry);
+        self.save_if_fits(entry);
+        if ttl.is_none() {
+            ttl = self.pick_up_db_expiry(&entry.content_hash);
+        }
+        self.update_expiry_tracking(ttl, &entry.content_hash);
+    }
+
     /// Process a clipboard content change: build entry, apply actions, and save.
     fn process_change(&self, content: ClipboardContent) {
         if let Some(mut entry) = self.build_entry(content) {
-            let ttl = self.apply_actions(&mut entry);
-            self.save_if_fits(&entry);
-            self.update_expiry_tracking(ttl, &entry.content_hash);
+            self.apply_save_and_track(&mut entry);
         }
     }
 
@@ -165,9 +191,7 @@ impl WatchState<'_> {
         need_sync: bool,
     ) -> Option<String> {
         if let Some(mut entry) = self.build_entry(content) {
-            let ttl = self.apply_actions(&mut entry);
-            self.save_if_fits(&entry);
-            self.update_expiry_tracking(ttl, &entry.content_hash);
+            self.apply_save_and_track(&mut entry);
             if need_sync {
                 if let EntryContent::Text(t) = entry.content {
                     return Some(t);
