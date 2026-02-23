@@ -88,10 +88,12 @@ pub fn create_factory() -> SignalListItemFactory {
             thumbnail.set_paintable(gtk4::gdk::Paintable::NONE);
             thumbnail.set_size_request(-1, -1);
             thumbnail.set_visible(false);
-            preview_label.set_text(&mask);
+            preview_label.set_text(&format!("\u{1F512} {mask}"));
+            preview_label.add_css_class("masked");
             preview_label.set_visible(true);
         } else if ct == "image" {
             preview_label.set_text("");
+            preview_label.remove_css_class("masked");
             preview_label.set_visible(false);
         } else {
             let display_text = if ct == "text" {
@@ -100,6 +102,7 @@ pub fn create_factory() -> SignalListItemFactory {
                 "[Unknown content]".to_string()
             };
             preview_label.set_text(&display_text);
+            preview_label.remove_css_class("masked");
             preview_label.set_visible(true);
         }
         meta_label.set_text(&meta_text);

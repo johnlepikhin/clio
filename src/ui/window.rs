@@ -255,6 +255,15 @@ pub fn build_window(
     setup_escape(&window);
     setup_expiry_timer(&window, &state);
 
+    // CSS for masked entries: italic + dimmed
+    let css_provider = gtk4::CssProvider::new();
+    css_provider.load_from_string("label.masked { font-style: italic; opacity: 0.75; }");
+    gtk4::style_context_add_provider_for_display(
+        &gtk4::gdk::Display::default().unwrap(),
+        &css_provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+
     window.set_child(Some(&main_box));
     window.present();
     list_view.grab_focus();
