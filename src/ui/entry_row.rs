@@ -1,4 +1,5 @@
 use chrono::{NaiveDateTime, Utc};
+use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Align, Label, ListItem, Orientation, SignalListItemFactory};
 
@@ -79,38 +80,9 @@ pub fn create_factory() -> SignalListItemFactory {
             .unwrap();
 
         let ct = entry_obj.content_type();
-        let mut meta_text = format_created_at(&entry_obj.created_at());
-
-        let source_app = entry_obj.source_app();
-        if !source_app.is_empty() {
-            meta_text.push_str(" | ");
-            meta_text.push_str(&source_app);
-            let source_title = entry_obj.source_title();
-            if !source_title.is_empty() {
-                meta_text.push_str(": ");
-                meta_text.push_str(&source_title);
-            }
-        }
-
-        let expires_at = entry_obj.expires_at();
-        if !expires_at.is_empty() {
-            if let Ok(expires) = NaiveDateTime::parse_from_str(&expires_at, TIMESTAMP_FORMAT) {
-                let now = Utc::now().naive_utc();
-                if expires > now {
-                    let remaining = expires - now;
-                    let std_dur =
-                        std::time::Duration::from_secs(remaining.num_seconds().unsigned_abs());
-                    let formatted = humantime::format_duration(std_dur).to_string();
-                    meta_text.push_str(" | expires in ");
-                    meta_text.push_str(&formatted);
-                } else {
-                    meta_text.push_str(" | expired");
-                }
-            }
-        }
+        let meta_text = build_meta_text(&entry_obj);
 
         if ct == "image" {
-            // Image is the preview; hide preview_label, show only meta
             preview_label.set_text("");
             preview_label.set_visible(false);
             meta_label.set_text(&meta_text);
@@ -126,9 +98,64 @@ pub fn create_factory() -> SignalListItemFactory {
             meta_label.set_text(&meta_text);
             meta_label.set_visible(true);
         }
+
+        // Live update: refresh "expires in" when timer emits notify::expires-at
+        let label_clone = meta_label.clone();
+        let handler_id = entry_obj.connect_notify_local(Some("expires-at"), move |obj, _| {
+            let eo: &EntryObject = obj.downcast_ref().unwrap();
+            label_clone.set_text(&build_meta_text(eo));
+        });
+        // SAFETY: standard gtk4-rs pattern for storing handler ID on a ListItem
+        unsafe {
+            list_item.set_data("expires-handler", handler_id);
+        }
+    });
+
+    factory.connect_unbind(|_, list_item| {
+        let list_item = list_item.downcast_ref::<ListItem>().unwrap();
+        let entry_obj = list_item.item().and_downcast::<EntryObject>().unwrap();
+        if let Some(handler_id) =
+            unsafe { list_item.steal_data::<glib::SignalHandlerId>("expires-handler") }
+        {
+            entry_obj.disconnect(handler_id);
+        }
     });
 
     factory
+}
+
+fn build_meta_text(entry_obj: &EntryObject) -> String {
+    let mut meta_text = format_created_at(&entry_obj.created_at());
+
+    let source_app = entry_obj.source_app();
+    if !source_app.is_empty() {
+        meta_text.push_str(" | ");
+        meta_text.push_str(&source_app);
+        let source_title = entry_obj.source_title();
+        if !source_title.is_empty() {
+            meta_text.push_str(": ");
+            meta_text.push_str(&source_title);
+        }
+    }
+
+    let expires_at = entry_obj.expires_at();
+    if !expires_at.is_empty() {
+        if let Ok(expires) = NaiveDateTime::parse_from_str(&expires_at, TIMESTAMP_FORMAT) {
+            let now = Utc::now().naive_utc();
+            if expires > now {
+                let remaining = expires - now;
+                let std_dur =
+                    std::time::Duration::from_secs(remaining.num_seconds().unsigned_abs());
+                let formatted = humantime::format_duration(std_dur).to_string();
+                meta_text.push_str(" | expires in ");
+                meta_text.push_str(&formatted);
+            } else {
+                meta_text.push_str(" | expired");
+            }
+        }
+    }
+
+    meta_text
 }
 
 fn format_created_at(raw: &str) -> String {

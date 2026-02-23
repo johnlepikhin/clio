@@ -9,10 +9,12 @@ use gtk4::prelude::*;
 use gtk4::{EventControllerKey, ListView, ScrolledWindow, SearchEntry, SingleSelection};
 use rusqlite::Connection;
 
+use chrono::{NaiveDateTime, Utc};
+
 use crate::config::Config;
 use crate::db;
 use crate::db::repository;
-use crate::models::entry::{ClipboardEntry, ContentHash, EntryContent};
+use crate::models::entry::{ClipboardEntry, ContentHash, EntryContent, TIMESTAMP_FORMAT};
 
 use super::entry_object::EntryObject;
 use super::entry_row;
@@ -250,6 +252,7 @@ pub fn build_window(
     setup_activate(&list_view, &state, &selection, &window, selected);
     setup_delete(&list_view, &state, &selection);
     setup_escape(&window);
+    setup_expiry_timer(&window, &state);
 
     window.set_child(Some(&main_box));
     window.present();
@@ -363,6 +366,58 @@ fn setup_escape(window: &gtk4::ApplicationWindow) {
         glib::Propagation::Proceed
     });
     window.add_controller(controller);
+}
+
+fn setup_expiry_timer(window: &gtk4::ApplicationWindow, state: &Rc<WindowState>) {
+    let state = state.clone();
+    let weak_window = window.downgrade();
+
+    glib::timeout_add_seconds_local(1, move || {
+        let Some(_window) = weak_window.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+
+        let now = Utc::now().naive_utc();
+        let n = state.store.n_items();
+
+        // Remove expired entries (reverse to avoid index shift)
+        for i in (0..n).rev() {
+            let Some(obj) = state.store.item(i) else {
+                continue;
+            };
+            let Ok(entry_obj) = obj.downcast::<EntryObject>() else {
+                continue;
+            };
+            let expires_at = entry_obj.expires_at();
+            if expires_at.is_empty() {
+                continue;
+            }
+            let Ok(expires) = NaiveDateTime::parse_from_str(&expires_at, TIMESTAMP_FORMAT) else {
+                continue;
+            };
+            if expires <= now {
+                let _ = repository::delete_entry(&state.conn, entry_obj.id());
+                state.store.remove(i);
+                state.load_one_more();
+            }
+        }
+
+        // Trigger notify for bound rows to refresh "expires in" text
+        let current_n = state.store.n_items();
+        for i in 0..current_n {
+            let Some(obj) = state.store.item(i) else {
+                continue;
+            };
+            let Ok(entry_obj) = obj.downcast::<EntryObject>() else {
+                continue;
+            };
+            if !entry_obj.expires_at().is_empty() {
+                entry_obj.notify("expires-at");
+            }
+        }
+
+        glib::ControlFlow::Continue
+    });
 }
 
 #[cfg(test)]
