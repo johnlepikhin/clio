@@ -25,6 +25,10 @@ pub fn run(
     }
 
     clipboard::write_clipboard_text_sync(&input)?;
+
+    // Also set PRIMARY selection so middle-click paste works immediately.
+    #[cfg(target_os = "linux")]
+    clipboard::write_selection_text(arboard::LinuxClipboardKind::Primary, &input);
     let mut entry = ClipboardEntry::from_text(input, None);
 
     entry.mask_text = mask_with;
