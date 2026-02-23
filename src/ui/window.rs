@@ -42,14 +42,14 @@ struct WindowState {
 }
 
 impl WindowState {
-    /// Fetch a page of entries from DB (respects current search query).
+    /// Fetch entries from DB with arbitrary limit (respects current search query).
     /// Text content is truncated to `preview_chars` in SQL to reduce I/O.
-    fn fetch_page(&self, offset: usize) -> Vec<ClipboardEntry> {
+    fn fetch_page_n(&self, offset: usize, limit: usize) -> Vec<ClipboardEntry> {
         let query = self.search_query.borrow().clone();
         if query.is_empty() {
             repository::list_entries_preview(
                 &self.conn,
-                self.page_size,
+                limit,
                 offset,
                 self.preview_chars,
             )
@@ -58,12 +58,17 @@ impl WindowState {
             repository::search_entries_preview(
                 &self.conn,
                 &query,
-                self.page_size,
+                limit,
                 offset,
                 self.preview_chars,
             )
             .unwrap_or_default()
         }
+    }
+
+    /// Fetch a page of entries using the configured page size.
+    fn fetch_page(&self, offset: usize) -> Vec<ClipboardEntry> {
+        self.fetch_page_n(offset, self.page_size)
     }
 
     /// Append entries to the backing ListStore.
@@ -129,6 +134,29 @@ impl WindowState {
         self.append_entries(&entries);
     }
 
+    /// Load one replacement entry after a deletion.
+    /// Adjusts offset (the deleted row shifts all subsequent rows) and fetches
+    /// a single entry to fill the gap, unless all entries are already loaded.
+    fn load_one_more(&self) {
+        let current_offset = {
+            let mut off = self.offset.borrow_mut();
+            *off = off.saturating_sub(1);
+            *off
+        };
+
+        if *self.all_loaded.borrow() {
+            return;
+        }
+
+        let entries = self.fetch_page_n(current_offset, 1);
+        if entries.is_empty() {
+            *self.all_loaded.borrow_mut() = true;
+        } else {
+            *self.offset.borrow_mut() = current_offset + entries.len();
+            self.append_entries(&entries);
+        }
+    }
+
     /// Load the next page (for infinite scroll).
     fn load_next_page(&self) {
         if *self.all_loaded.borrow() {
@@ -185,22 +213,7 @@ pub fn build_window(
     });
 
     // Load first page (text truncated in SQL for fast preview)
-    let entries = match repository::list_entries_preview(
-        &state.conn,
-        state.page_size,
-        0,
-        state.preview_chars,
-    ) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("error loading entries: {e}");
-            return;
-        }
-    };
-    let has_more = entries.len() >= state.page_size;
-    *state.offset.borrow_mut() = entries.len();
-    *state.all_loaded.borrow_mut() = !has_more;
-    state.append_entries(&entries);
+    state.reload();
 
     // Build widgets
     let window = gtk4::ApplicationWindow::builder()
@@ -324,6 +337,7 @@ fn setup_delete(
                 if let Ok(entry_obj) = obj.downcast::<EntryObject>() {
                     let _ = repository::delete_entry(&state.conn, entry_obj.id());
                     state.store.remove(selected);
+                    state.load_one_more();
                     let new_n = sel.n_items();
                     if new_n > 0 && selected < new_n {
                         sel.set_selected(selected);
