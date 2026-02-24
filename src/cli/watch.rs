@@ -42,6 +42,35 @@ fn limit_malloc_arenas() {
 #[cfg(not(target_os = "linux"))]
 fn trim_heap() {}
 
+/// Reap finished child processes to prevent zombie accumulation.
+/// `spawn_clipboard_server()` detaches children without waiting.
+///
+/// WARNING: `waitpid(-1)` reaps ALL child processes. If any code path needs
+/// to call `Child::wait()` on a spawned process, either collect it before
+/// this function runs, or switch to tracking specific PIDs.
+#[cfg(target_os = "linux")]
+fn reap_zombies() {
+    loop {
+        let ret = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
+        if ret > 0 {
+            continue;
+        }
+        if ret == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        break;
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reap_zombies() {}
+
+/// Post-iteration OS-level cleanup: release heap pages and reap zombie children.
+fn post_iteration_cleanup() {
+    trim_heap();
+    reap_zombies();
+}
+
 /// Shared state for the watch loop.
 struct WatchState<'a> {
     conn: &'a Connection,
@@ -417,7 +446,7 @@ fn run_disabled(
         state.process_change(content);
         last_hash = Some(hash);
 
-        trim_heap();
+        post_iteration_cleanup();
     }
 
     Ok(())
@@ -489,7 +518,7 @@ fn run_sync(
             }
         }
 
-        trim_heap();
+        post_iteration_cleanup();
     }
 
     Ok(())
