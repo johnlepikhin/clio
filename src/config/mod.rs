@@ -7,6 +7,7 @@ pub use types::{ActionRule, RuleActions, RuleConditions};
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
+use log::debug;
 
 use crate::errors::{AppError, Result};
 
@@ -21,9 +22,11 @@ pub fn load_config(override_path: Option<&Path>) -> Result<Config> {
     };
 
     if !path.exists() {
+        debug!("config file not found at {}, using defaults", path.display());
         return Ok(Config::default());
     }
 
+    debug!("loading config from {}", path.display());
     let contents = std::fs::read_to_string(&path)?;
     let config: Config = serde_yaml::from_str(&contents)
         .map_err(|e| AppError::Config(format!("{}: {}", path.display(), e)))?;

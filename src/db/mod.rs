@@ -3,11 +3,13 @@ pub mod repository;
 
 use std::path::Path;
 
+use log::debug;
 use rusqlite::Connection;
 
 use crate::errors::Result;
 
 pub fn init_db(path: &Path) -> Result<Connection> {
+    debug!("opening database at {}", path.display());
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]

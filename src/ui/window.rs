@@ -11,6 +11,8 @@ use rusqlite::Connection;
 
 use chrono::{NaiveDateTime, Utc};
 
+use log::{debug, error};
+
 use crate::config::Config;
 use crate::db;
 use crate::db::repository;
@@ -196,10 +198,11 @@ pub fn build_window(
     let conn = match db::init_db_ui(&db_path) {
         Ok(c) => Rc::new(c),
         Err(e) => {
-            eprintln!("error opening database: {e}");
+            error!("opening database: {e}");
             return;
         }
     };
+    debug!("history window: database opened");
 
     let store = gio::ListStore::new::<EntryObject>();
 

@@ -1,6 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use log::warn;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -330,15 +331,15 @@ prune_interval: 3s
             match rule.compile() {
                 Ok(r) => {
                     if r.ttl.is_none() && r.command.is_none() && r.mask_with.is_none() {
-                        eprintln!(
-                            "warning: skipping rule '{}': no actions (no ttl, command, or mask_with)",
+                        warn!(
+                            "skipping rule '{}': no actions (no ttl, command, or mask_with)",
                             r.name
                         );
                         continue;
                     }
                     compiled.push(r);
                 }
-                Err(e) => eprintln!("warning: skipping action rule: {e}"),
+                Err(e) => warn!("skipping action rule: {e}"),
             }
         }
         compiled

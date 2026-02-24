@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
+use log::debug;
 
 use cli::{Cli, Commands};
 
@@ -21,8 +22,12 @@ fn main() -> anyhow::Result<()> {
         return clipboard::serve::run().map_err(Into::into);
     }
 
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error")).init();
+    debug!("clio starting");
+
     let cli = Cli::parse();
     let config = config::load_config(cli.config.as_deref()).context("failed to load config")?;
+    debug!("config loaded, max_history={}, watch_interval={}ms", config.max_history, config.watch_interval_ms);
 
     let db_path = config
         .db_path

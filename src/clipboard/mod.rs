@@ -2,6 +2,7 @@ pub mod serve;
 pub mod source_app;
 
 use arboard::Clipboard;
+use log::error;
 
 #[cfg(target_os = "linux")]
 use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
@@ -89,12 +90,12 @@ pub fn write_selection_text(
             let mut cb = match Clipboard::new() {
                 Ok(cb) => cb,
                 Err(e) => {
-                    eprintln!("clipboard error: {e}");
+                    error!("clipboard write error: {e}");
                     return;
                 }
             };
             if let Err(e) = cb.set().wait().clipboard(kind).text(text) {
-                eprintln!("clipboard error: {e}");
+                error!("clipboard write error: {e}");
             }
         })
         .ok()

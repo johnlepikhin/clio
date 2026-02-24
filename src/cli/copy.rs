@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::bail;
 use chrono::Utc;
+use log::{debug, warn};
 use rusqlite::Connection;
 
 use crate::clipboard;
@@ -19,12 +20,14 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
+    debug!("read {} bytes from stdin", input.len());
 
     if input.is_empty() {
         bail!("stdin is empty");
     }
 
     clipboard::write_clipboard_text_sync(&input)?;
+    debug!("clipboard written");
 
     // Also set PRIMARY selection so middle-click paste works immediately.
     #[cfg(target_os = "linux")]
@@ -37,7 +40,7 @@ pub fn run(
         let chrono_d = match chrono::Duration::from_std(d) {
             Ok(d) => d,
             Err(_) => {
-                eprintln!("warning: TTL duration {d:?} too large, entry will not expire");
+                warn!("TTL duration {d:?} too large, entry will not expire");
                 chrono::Duration::MAX
             }
         };
@@ -46,6 +49,7 @@ pub fn run(
     });
 
     repository::save_or_update(conn, &entry, config.max_history, config.max_age)?;
+    debug!("entry saved to database");
 
     Ok(())
 }

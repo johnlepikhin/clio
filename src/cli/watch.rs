@@ -10,6 +10,7 @@ use arboard::LinuxClipboardKind;
 
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
+use log::{debug, error, info, warn};
 
 use crate::actions;
 use crate::clipboard::source_app;
@@ -67,7 +68,7 @@ impl WatchState<'_> {
             return;
         }
         if let Err(e) = repository::prune_expired(self.conn, self.max_age) {
-            eprintln!("error pruning expired entries: {e}");
+            error!("pruning expired entries: {e}");
         }
         self.last_prune.set(Instant::now());
     }
@@ -76,8 +77,13 @@ impl WatchState<'_> {
     /// Rejects oversized images early (before PNG encoding) based on RGBA size.
     fn build_entry(&self, content: ClipboardContent) -> Option<ClipboardEntry> {
         let info = source_app::detect_source_app();
+        debug!(
+            "source app: class={:?}, title={:?}",
+            info.class, info.title
+        );
         match content {
             ClipboardContent::Text(t) => {
+                debug!("clipboard text, {} bytes", t.len());
                 let mut entry = ClipboardEntry::from_text(t, info.class);
                 entry.source_title = info.title;
                 Some(entry)
@@ -88,7 +94,7 @@ impl WatchState<'_> {
                 rgba_bytes,
             } => {
                 if rgba_bytes.len() as u64 > self.max_size {
-                    eprintln!(
+                    warn!(
                         "skipping image: RGBA size {} KB exceeds limit {} KB",
                         rgba_bytes.len() / 1024,
                         self.max_size / 1024
@@ -125,8 +131,9 @@ impl WatchState<'_> {
 
     /// Save entry to DB if within size limit.
     fn save_if_fits(&self, entry: &ClipboardEntry) {
+        debug!("saving entry, size={} bytes", entry.content_size_bytes());
         if entry.content_size_bytes() as u64 > self.max_size {
-            eprintln!(
+            warn!(
                 "skipping entry: size {} KB exceeds limit {} KB",
                 entry.content_size_bytes() / 1024,
                 self.max_size / 1024
@@ -134,13 +141,14 @@ impl WatchState<'_> {
             return;
         }
         if let Err(e) = repository::save_or_update(self.conn, entry, self.max_history, self.max_age) {
-            eprintln!("error saving entry: {e}");
+            error!("saving entry: {e}");
         }
     }
 
     /// Update expiry tracking state after processing an entry.
     fn update_expiry_tracking(&self, ttl: Option<Duration>, content_hash: &ContentHash) {
         if let Some(d) = ttl {
+            debug!("TTL set: {d:?}");
             self.current_expiry.set(Some(Instant::now() + d));
             *self.current_expiry_hash.borrow_mut() = Some(*content_hash);
         } else {
@@ -153,7 +161,7 @@ impl WatchState<'_> {
     /// (e.g. set by `clio copy --ttl`) and pick it up for clipboard clearing.
     fn pick_up_db_expiry(&self, content_hash: &ContentHash) -> Option<Duration> {
         let entry = repository::find_by_hash(self.conn, content_hash)
-            .inspect_err(|e| eprintln!("error looking up expiry: {e}"))
+            .inspect_err(|e| error!("looking up expiry: {e}"))
             .ok()??;
         let expires_str = entry.expires_at.as_deref()?;
         let expires = NaiveDateTime::parse_from_str(expires_str, TIMESTAMP_FORMAT).ok()?;
@@ -215,7 +223,7 @@ impl WatchState<'_> {
 
         // Prune expired entries from DB
         if let Err(e) = repository::prune_expired(self.conn, self.max_age) {
-            eprintln!("error pruning expired entries: {e}");
+            error!("pruning expired entries: {e}");
         }
         self.last_prune.set(Instant::now());
 
@@ -231,7 +239,7 @@ impl WatchState<'_> {
         }
 
         // Restore previous active entry
-        eprintln!("clipboard entry expired, restoring previous");
+        info!("clipboard entry expired, restoring previous");
         match repository::get_latest_active(self.conn) {
             Ok(Some(entry)) => {
                 if let Some(text) = entry.content.text() {
@@ -251,7 +259,7 @@ impl WatchState<'_> {
                 })
             }
             Err(e) => {
-                eprintln!("error querying latest entry: {e}");
+                error!("querying latest entry: {e}");
                 None
             }
         }
@@ -345,11 +353,11 @@ pub fn run(conn: &Connection, config: &Config) -> anyhow::Result<()> {
     let has_ttl_rules = rules.iter().any(|r| r.ttl.is_some());
 
     if !rules.is_empty() {
-        eprintln!("loaded {} action rule(s)", rules.len());
+        info!("loaded {} action rule(s)", rules.len());
     }
 
-    eprintln!(
-        "watching clipboard (interval: {}ms, sync: {})...",
+    info!(
+        "watching clipboard (interval: {}ms, sync: {})",
         config.watch_interval_ms, config.sync_mode
     );
 

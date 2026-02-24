@@ -3,6 +3,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use chrono::Utc;
+use log::{debug, warn};
 
 use crate::config::CompiledRule;
 use crate::models::entry::{ClipboardEntry, EntryContent, TIMESTAMP_FORMAT};
@@ -40,6 +41,8 @@ pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResu
             continue;
         }
 
+        debug!("rule '{}' matched", rule.name);
+
         // Apply TTL action (last match wins)
         if let Some(rule_ttl) = rule.ttl {
             ttl = Some(rule_ttl);
@@ -53,11 +56,12 @@ pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResu
         // Apply command action (only for text entries)
         if let Some(ref cmd) = rule.command {
             if let Some(ref input) = current_text {
+                debug!("running command for rule '{}': {:?}", rule.name, cmd);
                 match run_command(cmd, input, rule.command_timeout) {
                     Ok(output) => current_text = Some(output),
                     Err(e) => {
-                        eprintln!(
-                            "warning: command failed for rule '{}': {e}; keeping original text",
+                        warn!(
+                            "command failed for rule '{}': {e}; keeping original text",
                             rule.name
                         );
                     }
@@ -77,7 +81,7 @@ pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResu
         let chrono_d = match chrono::Duration::from_std(d) {
             Ok(d) => d,
             Err(_) => {
-                eprintln!("warning: TTL duration {d:?} too large, entry will not expire");
+                warn!("TTL duration {d:?} too large, entry will not expire");
                 chrono::Duration::MAX
             }
         };
