@@ -13,6 +13,7 @@ use chrono::{NaiveDateTime, Utc};
 
 use log::{debug, error};
 
+use crate::clipboard;
 use crate::config::Config;
 use crate::db;
 use crate::db::repository;
@@ -338,6 +339,42 @@ fn setup_activate(
     });
 }
 
+/// Delete entry from DB and clear clipboard if the deleted entry is currently there.
+/// Mirrors the watch daemon's expiry-restore logic for consistency.
+fn delete_and_clear_clipboard(conn: &Connection, entry_id: i64) {
+    // Load entry to get content hash before deleting
+    let entry = repository::get_entry_content(conn, entry_id).ok().flatten();
+    let _ = repository::delete_entry(conn, entry_id);
+
+    let Some(entry) = entry else { return };
+
+    // Check if deleted entry is currently in clipboard
+    let current_hash = clipboard::read_clipboard().ok().and_then(|c| c.content_hash());
+
+    if current_hash.as_ref() != Some(&entry.content_hash) {
+        return;
+    }
+
+    // Restore previous active entry or clear clipboard
+    match repository::get_latest_active(conn) {
+        Ok(Some(prev)) => match &prev.content {
+            EntryContent::Text(text) => {
+                let _ = clipboard::write_clipboard_text_sync(text);
+            }
+            EntryContent::Image(blob) => {
+                if let Ok(img) = image::load_from_memory(blob) {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    let _ = clipboard::write_clipboard_image_sync(w, h, rgba.into_raw());
+                }
+            }
+        },
+        _ => {
+            let _ = clipboard::write_clipboard_text_sync("");
+        }
+    }
+}
+
 fn setup_delete(
     list_view: &ListView,
     state: &Rc<WindowState>,
@@ -351,7 +388,7 @@ fn setup_delete(
             let selected = sel.selected();
             if let Some(obj) = sel.selected_item() {
                 if let Ok(entry_obj) = obj.downcast::<EntryObject>() {
-                    let _ = repository::delete_entry(&state.conn, entry_obj.id());
+                    delete_and_clear_clipboard(&state.conn, entry_obj.id());
                     state.store.remove(selected);
                     state.load_one_more();
                     let new_n = sel.n_items();
@@ -409,7 +446,7 @@ fn setup_expiry_timer(window: &gtk4::ApplicationWindow, state: &Rc<WindowState>)
                 continue;
             };
             if expires <= now {
-                let _ = repository::delete_entry(&state.conn, entry_obj.id());
+                delete_and_clear_clipboard(&state.conn, entry_obj.id());
                 state.store.remove(i);
                 state.load_one_more();
             }
