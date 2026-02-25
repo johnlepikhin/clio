@@ -8,6 +8,7 @@ use log::error;
 use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
 
 use crate::errors::{AppError, Result};
+use crate::models::entry::{compute_hash, ContentHash};
 
 #[derive(Debug)]
 pub enum ClipboardContent {
@@ -18,6 +19,17 @@ pub enum ClipboardContent {
         rgba_bytes: Vec<u8>,
     },
     Empty,
+}
+
+impl ClipboardContent {
+    /// Compute content hash, or None if empty.
+    pub fn content_hash(&self) -> Option<ContentHash> {
+        match self {
+            Self::Text(t) => Some(compute_hash(t.as_bytes())),
+            Self::Image { rgba_bytes, .. } => Some(compute_hash(rgba_bytes)),
+            Self::Empty => None,
+        }
+    }
 }
 
 fn open_clipboard() -> Result<Clipboard> {

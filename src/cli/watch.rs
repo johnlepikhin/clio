@@ -257,7 +257,7 @@ impl WatchState<'_> {
         self.last_prune.set(Instant::now());
 
         // Check if the expired entry is still in clipboard
-        let current_cb_hash = clipboard::read_clipboard().ok().as_ref().and_then(content_hash);
+        let current_cb_hash = clipboard::read_clipboard().ok().and_then(|c| c.content_hash());
         let expired_still_in_clipboard = match (&current_cb_hash, &expired_hash) {
             (Some(current), Some(expired)) => current == expired,
             _ => false,
@@ -270,16 +270,28 @@ impl WatchState<'_> {
         // Restore previous active entry
         info!("clipboard entry expired, restoring previous");
         match repository::get_latest_active(self.conn) {
-            Ok(Some(entry)) => {
-                if let Some(text) = entry.content.text() {
+            Ok(Some(entry)) => match &entry.content {
+                EntryContent::Text(text) => {
                     let _ = clipboard::write_clipboard_text_sync(text);
-                    return Some(RestoreResult {
+                    Some(RestoreResult {
                         clipboard_hash: entry.content_hash,
                         restored_text: text.to_owned(),
-                    });
+                    })
                 }
-                None
-            }
+                EntryContent::Image(blob) => {
+                    if let Ok(img) = image::load_from_memory(blob) {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = rgba.dimensions();
+                        let _ = clipboard::write_clipboard_image_sync(w, h, rgba.into_raw());
+                        Some(RestoreResult {
+                            clipboard_hash: entry.content_hash,
+                            restored_text: String::new(),
+                        })
+                    } else {
+                        None
+                    }
+                }
+            },
             Ok(None) => {
                 let _ = clipboard::write_clipboard_text_sync("");
                 Some(RestoreResult {
@@ -317,7 +329,7 @@ impl WatchState<'_> {
         should_sync: bool,
     ) -> SelectionResult {
         let content = clipboard::read_selection(LinuxClipboardKind::Clipboard).ok();
-        let hash = content.as_ref().and_then(content_hash);
+        let hash = content.as_ref().and_then(|c| c.content_hash());
         let changed = hash.as_ref().is_some_and(|h| last_hash.as_ref() != Some(h));
 
         if !changed {
@@ -341,7 +353,7 @@ impl WatchState<'_> {
         should_sync: bool,
     ) -> SelectionResult {
         let content = clipboard::read_selection(LinuxClipboardKind::Primary).ok();
-        let hash = content.as_ref().and_then(content_hash);
+        let hash = content.as_ref().and_then(|c| c.content_hash());
         let changed = hash.as_ref().is_some_and(|h| last_hash.as_ref() != Some(h));
 
         if !changed {
@@ -358,14 +370,6 @@ impl WatchState<'_> {
     }
 }
 
-/// Compute hash for clipboard content, or None if empty.
-fn content_hash(content: &ClipboardContent) -> Option<ContentHash> {
-    match content {
-        ClipboardContent::Text(t) => Some(compute_hash(t.as_bytes())),
-        ClipboardContent::Image { rgba_bytes, .. } => Some(compute_hash(rgba_bytes)),
-        ClipboardContent::Empty => None,
-    }
-}
 
 pub fn run(conn: &Connection, config: &Config) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
@@ -434,7 +438,7 @@ fn run_disabled(
             Err(_) => continue,
         };
 
-        let hash = match content_hash(&content) {
+        let hash = match content.content_hash() {
             Some(h) => h,
             None => continue,
         };
