@@ -54,10 +54,8 @@ pub fn update_timestamp_and_expiry(
     Ok(())
 }
 
-/// Update entry on dedup: refresh timestamp, COALESCE expires_at, source_app, and source_title.
+/// Update entry on dedup: refresh timestamp, COALESCE all optional fields.
 /// None means "keep existing value", Some means "overwrite".
-/// Exception: mask_text is always overwritten (not COALESCEd) so that stale masks
-/// don't persist when a rule no longer matches.
 fn update_on_dedup(
     conn: &Connection,
     id: i64,
@@ -72,7 +70,7 @@ fn update_on_dedup(
              expires_at = COALESCE(?2, expires_at),
              source_app = COALESCE(?3, source_app),
              source_title = COALESCE(?4, source_title),
-             mask_text = ?5
+             mask_text = COALESCE(?5, mask_text)
          WHERE id = ?1",
         params![id, expires_at, source_app, source_title, mask_text],
     )?;
@@ -780,10 +778,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_clears_mask_text_when_new_is_none() {
+    fn test_dedup_preserves_mask_text_when_new_is_none() {
         let conn = setup();
 
-        // First save with mask
+        // First save with mask (e.g. via `clio copy --mask-with`)
         let mut entry1 = ClipboardEntry::from_text("secret".to_string(), None);
         entry1.mask_text = Some("••••••".to_string());
         let id1 = save_or_update(&conn, &entry1, 500, None).unwrap();
@@ -791,15 +789,15 @@ mod tests {
         let found1 = get_entry_content(&conn, id1).unwrap().unwrap();
         assert_eq!(found1.mask_text.as_deref(), Some("••••••"));
 
-        // Same content without mask (rule no longer matches)
+        // Same content without mask (e.g. watch daemon dedup)
         let entry2 = ClipboardEntry::from_text("secret".to_string(), None);
         assert!(entry2.mask_text.is_none());
         let id2 = save_or_update(&conn, &entry2, 500, None).unwrap();
 
         assert_eq!(id1, id2);
-        // Mask must be cleared, not preserved
+        // Mask must be preserved (COALESCE keeps existing value)
         let found2 = get_entry_content(&conn, id2).unwrap().unwrap();
-        assert!(found2.mask_text.is_none());
+        assert_eq!(found2.mask_text.as_deref(), Some("••••••"));
     }
 
     #[test]
