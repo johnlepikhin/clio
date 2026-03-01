@@ -47,6 +47,18 @@ fn main() -> anyhow::Result<()> {
         }
         #[cfg(feature = "ui")]
         Commands::History => cli::history::run(&config, db_path).map_err(Into::into),
+        Commands::List {
+            ref format,
+            preview_length,
+            limit,
+        } => {
+            let conn = db::init_db(&db_path).context("failed to initialize database")?;
+            cli::list::run(&conn, format, preview_length, limit)
+        }
+        Commands::Select { ref source } => {
+            let conn = db::init_db(&db_path).context("failed to initialize database")?;
+            cli::select::run(&conn, source)
+        }
         Commands::Config { ref command } => {
             let config_path = cli
                 .config
