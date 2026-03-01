@@ -54,9 +54,12 @@ fn parse_id_from_stdin() -> anyhow::Result<i64> {
 }
 
 fn parse_id_from_line(line: &str) -> anyhow::Result<i64> {
-    let token = line.split('\t').next().unwrap_or("");
+    let trimmed = line.trim();
+    let token = trimmed
+        .rsplit_once(' ')
+        .map(|(_, id)| id)
+        .unwrap_or(trimmed);
     token
-        .trim()
         .parse::<i64>()
         .context("failed to parse entry ID from stdin")
 }
@@ -66,8 +69,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_id_with_tab_preview() {
-        assert_eq!(parse_id_from_line("42\tsome text").unwrap(), 42);
+    fn test_parse_id_from_dmenu_format() {
+        let spacer = " ".repeat(300);
+        let line = format!("5m ago some clipboard text{spacer}42");
+        assert_eq!(parse_id_from_line(&line).unwrap(), 42);
     }
 
     #[test]
@@ -76,8 +81,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_id_with_whitespace() {
-        assert_eq!(parse_id_from_line("  15\t text ").unwrap(), 15);
+    fn test_parse_id_with_trailing_whitespace() {
+        let spacer = " ".repeat(300);
+        let line = format!("just now hello{spacer}15 ");
+        assert_eq!(parse_id_from_line(&line).unwrap(), 15);
     }
 
     #[test]
@@ -87,6 +94,8 @@ mod tests {
 
     #[test]
     fn test_parse_id_invalid() {
-        assert!(parse_id_from_line("abc\ttext").is_err());
+        let spacer = " ".repeat(300);
+        let line = format!("5m ago text{spacer}abc");
+        assert!(parse_id_from_line(&line).is_err());
     }
 }

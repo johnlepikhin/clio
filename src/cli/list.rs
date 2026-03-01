@@ -6,10 +6,21 @@ use rusqlite::Connection;
 
 use crate::db::repository;
 use crate::models::entry::EntryContent;
+use crate::time_fmt::format_created_at;
 
 use super::ListFormat;
 
 static WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\r\n\t ]+").unwrap());
+
+/// 300 spaces to push the ID far beyond the visible area in dmenu/rofi/wofi.
+const SPACER: &str = concat!(
+    "                                                  ",
+    "                                                  ",
+    "                                                  ",
+    "                                                  ",
+    "                                                  ",
+    "                                                  ",
+);
 
 pub fn run(
     conn: &Connection,
@@ -35,7 +46,8 @@ pub fn run(
             }
         };
 
-        println!("{id}\t{preview}");
+        let time_ago = format_created_at(entry.created_at.as_deref().unwrap_or(""));
+        println!("{time_ago} {preview}{SPACER}{id}");
     }
 
     Ok(())

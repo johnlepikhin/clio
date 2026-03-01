@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod errors;
 mod models;
+mod time_fmt;
 #[cfg(feature = "ui")]
 mod ui;
 
