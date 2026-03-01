@@ -37,4 +37,9 @@ Rust (edition 2021, stable toolchain): Follow standard conventions
 
 
 <!-- MANUAL ADDITIONS START -->
+
+## Tools
+
+- **ast-index**: Actively use the `/ast-index` skill for codebase navigation — finding structs, functions, implementations, usages, module dependencies, and project structure. Prefer it over manual Grep/Glob when searching for symbols or understanding code relationships.
+
 <!-- MANUAL ADDITIONS END -->
