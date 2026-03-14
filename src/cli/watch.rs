@@ -323,40 +323,24 @@ struct SelectionResult {
 }
 
 impl WatchState<'_> {
-    /// Read CLIPBOARD selection using an existing Clipboard instance, process if changed.
+    /// Read a selection, process if changed, reconnect once on error.
     #[cfg(target_os = "linux")]
-    fn poll_clipboard(
+    fn poll_selection(
         &self,
         cb: &mut Clipboard,
+        kind: LinuxClipboardKind,
         last_hash: &Option<ContentHash>,
         should_sync: bool,
     ) -> SelectionResult {
-        let content = clipboard::read_selection_with(cb, LinuxClipboardKind::Clipboard).ok();
-        let hash = content.as_ref().and_then(|c| c.content_hash());
-        let changed = hash.as_ref().is_some_and(|h| last_hash.as_ref() != Some(h));
-
-        if !changed {
-            return SelectionResult { hash: *last_hash, sync_text: None };
-        }
-
-        let sync_text = if let Some(content) = content {
-            self.process_change_with_sync(content, should_sync)
-        } else {
-            None
+        let content = match clipboard::read_selection_with(cb, kind) {
+            Ok(c) => Some(c),
+            Err(_) => {
+                if let Ok(new_cb) = clipboard::open_clipboard() {
+                    *cb = new_cb;
+                }
+                clipboard::read_selection_with(cb, kind).ok()
+            }
         };
-
-        SelectionResult { hash, sync_text }
-    }
-
-    /// Read PRIMARY selection using an existing Clipboard instance, process if changed.
-    #[cfg(target_os = "linux")]
-    fn poll_primary(
-        &self,
-        cb: &mut Clipboard,
-        last_hash: &Option<ContentHash>,
-        should_sync: bool,
-    ) -> SelectionResult {
-        let content = clipboard::read_selection_with(cb, LinuxClipboardKind::Primary).ok();
         let hash = content.as_ref().and_then(|c| c.content_hash());
         let changed = hash.as_ref().is_some_and(|h| last_hash.as_ref() != Some(h));
 
@@ -505,7 +489,7 @@ fn run_sync(
 
         // Process CLIPBOARD first; its buffer is freed before PRIMARY read.
         let sync_to_primary = matches!(sync_mode, SyncMode::Both | SyncMode::ToPrimary);
-        let cb_result = state.poll_clipboard(cb, &last_clipboard_hash, sync_to_primary);
+        let cb_result = state.poll_selection(cb, LinuxClipboardKind::Clipboard, &last_clipboard_hash, sync_to_primary);
         last_clipboard_hash = cb_result.hash;
         let synced_to_primary = if let Some(text) = cb_result.sync_text {
             let new_handle =
@@ -524,7 +508,7 @@ fn run_sync(
         // the same content we wrote, wasting an allocation.
         if !synced_to_primary {
             let sync_to_clipboard = matches!(sync_mode, SyncMode::Both | SyncMode::ToClipboard);
-            let pr = state.poll_primary(cb, &last_primary_hash, sync_to_clipboard);
+            let pr = state.poll_selection(cb, LinuxClipboardKind::Primary, &last_primary_hash, sync_to_clipboard);
             last_primary_hash = pr.hash;
             if let Some(text) = pr.sync_text {
                 let new_handle =

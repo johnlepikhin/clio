@@ -40,28 +40,6 @@ pub fn open_clipboard() -> Result<Clipboard> {
 // Read
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
-pub fn read_selection(kind: LinuxClipboardKind) -> Result<ClipboardContent> {
-    let mut cb = open_clipboard()?;
-
-    match cb.get().clipboard(kind).text() {
-        Ok(text) if !text.is_empty() => return Ok(ClipboardContent::Text(text)),
-        _ => {}
-    }
-
-    if matches!(kind, LinuxClipboardKind::Clipboard) {
-        if let Ok(img) = cb.get().clipboard(kind).image() {
-            return Ok(ClipboardContent::Image {
-                width: img.width as u32,
-                height: img.height as u32,
-                rgba_bytes: img.bytes.into_owned(),
-            });
-        }
-    }
-
-    Ok(ClipboardContent::Empty)
-}
-
 /// Read a selection using an existing Clipboard instance (avoids reconnecting).
 #[cfg(target_os = "linux")]
 pub fn read_selection_with(
@@ -110,26 +88,8 @@ pub fn read_clipboard_with(cb: &mut Clipboard) -> Result<ClipboardContent> {
 }
 
 pub fn read_clipboard() -> Result<ClipboardContent> {
-    #[cfg(target_os = "linux")]
-    {
-        read_selection(LinuxClipboardKind::Clipboard)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let mut cb = open_clipboard()?;
-        match cb.get_text() {
-            Ok(text) if !text.is_empty() => return Ok(ClipboardContent::Text(text)),
-            _ => {}
-        }
-        if let Ok(img) = cb.get_image() {
-            return Ok(ClipboardContent::Image {
-                width: img.width as u32,
-                height: img.height as u32,
-                rgba_bytes: img.bytes.into_owned(),
-            });
-        }
-        Ok(ClipboardContent::Empty)
-    }
+    let mut cb = open_clipboard()?;
+    read_clipboard_with(&mut cb)
 }
 
 // ---------------------------------------------------------------------------
