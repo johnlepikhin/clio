@@ -14,45 +14,87 @@ pub fn detect_source_app() -> SourceInfo {
     active_window_info().unwrap_or_else(|| clipboard_owner_info().unwrap_or_default())
 }
 
+/// Cached X11 connection to avoid reconnecting on every clipboard change.
+#[cfg(all(target_os = "linux", feature = "x11-source-app"))]
+mod x11_cache {
+    use std::cell::RefCell;
+    use x11rb::rust_connection::RustConnection;
+
+    pub struct CachedConn {
+        pub conn: RustConnection,
+        pub root: u32,
+    }
+
+    thread_local! {
+        static CONN: RefCell<Option<CachedConn>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` with a cached X11 connection. On error, invalidate and retry once.
+    pub fn with_conn<T>(f: impl Fn(&CachedConn) -> Option<T>) -> Option<T> {
+        CONN.with(|cell| {
+            // Try with cached connection
+            let mut borrow = cell.borrow_mut();
+            if borrow.is_none() {
+                *borrow = connect();
+            }
+            if let Some(ref cached) = *borrow {
+                if let Some(result) = f(cached) {
+                    return Some(result);
+                }
+            }
+            // Connection may be stale — reconnect once
+            *borrow = connect();
+            if let Some(ref cached) = *borrow {
+                f(cached)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn connect() -> Option<CachedConn> {
+        use x11rb::connection::Connection;
+        let (conn, screen_num) = x11rb::connect(None).ok()?;
+        let root = conn.setup().roots[screen_num].root;
+        Some(CachedConn { conn, root })
+    }
+}
+
 /// Primary strategy: read WM_CLASS and title from _NET_ACTIVE_WINDOW.
 #[cfg(all(target_os = "linux", feature = "x11-source-app"))]
 fn active_window_info() -> Option<SourceInfo> {
-    use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
 
-    let (conn, screen_num) = x11rb::connect(None).ok()?;
-    let root = conn.setup().roots[screen_num].root;
+    x11_cache::with_conn(|cached| {
+        let conn = &cached.conn;
 
-    let active_atom = conn
-        .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-        .ok()?
-        .reply()
-        .ok()?
-        .atom;
+        let active_atom = conn
+            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
 
-    let reply = conn
-        .get_property(false, root, active_atom, AtomEnum::ANY, 0, 1)
-        .ok()?
-        .reply()
-        .ok()?;
+        let reply = conn
+            .get_property(false, cached.root, active_atom, AtomEnum::ANY, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?;
 
-    let window = reply.value32()?.next()?;
-    if window == 0 {
-        return None;
-    }
+        let window = reply.value32()?.next()?;
+        if window == 0 {
+            return None;
+        }
 
-    // Read title from the original top-level window
-    let title = read_window_title(&conn, window);
+        let title = read_window_title(conn, window);
+        let class = wm_class_with_traversal(conn, window);
 
-    // WM_CLASS may be on the window itself or a parent
-    let class = wm_class_with_traversal(&conn, window);
-
-    // Return info only if at least class was found
-    if class.is_some() || title.is_some() {
-        Some(SourceInfo { class, title })
-    } else {
-        None
-    }
+        if class.is_some() || title.is_some() {
+            Some(SourceInfo { class, title })
+        } else {
+            None
+        }
+    })
 }
 
 /// Read WM_CLASS from `window`, walking up the parent chain (up to 10 levels).
@@ -151,29 +193,31 @@ fn read_window_title(
 fn clipboard_owner_info() -> Option<SourceInfo> {
     use x11rb::protocol::xproto::ConnectionExt;
 
-    let (conn, _) = x11rb::connect(None).ok()?;
-    let clipboard_atom = conn
-        .intern_atom(false, b"CLIPBOARD")
-        .ok()?
-        .reply()
-        .ok()?
-        .atom;
-    let owner = conn
-        .get_selection_owner(clipboard_atom)
-        .ok()?
-        .reply()
-        .ok()?
-        .owner;
-    if owner == 0 {
-        return None;
-    }
-    let class = read_wm_class(&conn, owner);
-    let title = read_window_title(&conn, owner);
-    if class.is_some() || title.is_some() {
-        Some(SourceInfo { class, title })
-    } else {
-        None
-    }
+    x11_cache::with_conn(|cached| {
+        let conn = &cached.conn;
+        let clipboard_atom = conn
+            .intern_atom(false, b"CLIPBOARD")
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
+        let owner = conn
+            .get_selection_owner(clipboard_atom)
+            .ok()?
+            .reply()
+            .ok()?
+            .owner;
+        if owner == 0 {
+            return None;
+        }
+        let class = read_wm_class(conn, owner);
+        let title = read_window_title(conn, owner);
+        if class.is_some() || title.is_some() {
+            Some(SourceInfo { class, title })
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(not(all(target_os = "linux", feature = "x11-source-app")))]
