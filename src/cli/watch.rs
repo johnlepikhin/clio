@@ -12,6 +12,8 @@ use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use log::{debug, error, info, warn};
 
+use arboard::Clipboard;
+
 use crate::actions;
 use crate::clipboard::source_app;
 use crate::clipboard::{self, ClipboardContent};
@@ -240,7 +242,7 @@ impl WatchState<'_> {
 
     /// Check if the current TTL entry has expired and restore the previous entry.
     /// Returns Some if clipboard was updated (hash + optional text for primary sync).
-    fn check_expiry_and_restore(&self) -> Option<RestoreResult> {
+    fn check_expiry_and_restore(&self, cb: &mut Clipboard) -> Option<RestoreResult> {
         let expiry = self.current_expiry.get()?;
         if Instant::now() < expiry {
             return None;
@@ -257,7 +259,7 @@ impl WatchState<'_> {
         self.last_prune.set(Instant::now());
 
         // Check if the expired entry is still in clipboard
-        let current_cb_hash = clipboard::read_clipboard().ok().and_then(|c| c.content_hash());
+        let current_cb_hash = clipboard::read_clipboard_with(cb).ok().and_then(|c| c.content_hash());
         let expired_still_in_clipboard = match (&current_cb_hash, &expired_hash) {
             (Some(current), Some(expired)) => current == expired,
             _ => false,
@@ -321,14 +323,15 @@ struct SelectionResult {
 }
 
 impl WatchState<'_> {
-    /// Read a selection, process if changed, return new hash and optional sync text.
+    /// Read CLIPBOARD selection using an existing Clipboard instance, process if changed.
     #[cfg(target_os = "linux")]
     fn poll_clipboard(
         &self,
+        cb: &mut Clipboard,
         last_hash: &Option<ContentHash>,
         should_sync: bool,
     ) -> SelectionResult {
-        let content = clipboard::read_selection(LinuxClipboardKind::Clipboard).ok();
+        let content = clipboard::read_selection_with(cb, LinuxClipboardKind::Clipboard).ok();
         let hash = content.as_ref().and_then(|c| c.content_hash());
         let changed = hash.as_ref().is_some_and(|h| last_hash.as_ref() != Some(h));
 
@@ -345,14 +348,15 @@ impl WatchState<'_> {
         SelectionResult { hash, sync_text }
     }
 
-    /// Read PRIMARY, process text if changed, return new hash and optional sync text.
+    /// Read PRIMARY selection using an existing Clipboard instance, process if changed.
     #[cfg(target_os = "linux")]
     fn poll_primary(
         &self,
+        cb: &mut Clipboard,
         last_hash: &Option<ContentHash>,
         should_sync: bool,
     ) -> SelectionResult {
-        let content = clipboard::read_selection(LinuxClipboardKind::Primary).ok();
+        let content = clipboard::read_selection_with(cb, LinuxClipboardKind::Primary).ok();
         let hash = content.as_ref().and_then(|c| c.content_hash());
         let changed = hash.as_ref().is_some_and(|h| last_hash.as_ref() != Some(h));
 
@@ -410,11 +414,14 @@ pub fn run(conn: &Connection, config: &Config) -> anyhow::Result<()> {
     let interval = Duration::from_millis(config.watch_interval_ms);
     let sync_mode = config.sync_mode;
 
+    let mut cb = clipboard::open_clipboard()
+        .context("failed to open clipboard")?;
+
     if sync_mode == SyncMode::Disabled {
-        return run_disabled(&state, &running, interval);
+        return run_disabled(&state, &running, interval, &mut cb);
     }
 
-    run_sync(&state, &running, interval, sync_mode)
+    run_sync(&state, &running, interval, sync_mode, &mut cb)
 }
 
 /// Disabled mode: only monitor CLIPBOARD, no PRIMARY interaction.
@@ -422,6 +429,7 @@ fn run_disabled(
     state: &WatchState<'_>,
     running: &Arc<AtomicBool>,
     interval: Duration,
+    cb: &mut Clipboard,
 ) -> anyhow::Result<()> {
     let mut last_hash: Option<ContentHash> = None;
 
@@ -429,13 +437,19 @@ fn run_disabled(
         std::thread::sleep(interval);
         state.maybe_prune();
 
-        if let Some(result) = state.check_expiry_and_restore() {
+        if let Some(result) = state.check_expiry_and_restore(cb) {
             last_hash = Some(result.clipboard_hash);
         }
 
-        let content = match clipboard::read_clipboard() {
+        let content = match clipboard::read_clipboard_with(cb) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(_) => {
+                // Reconnect once on error
+                if let Ok(new_cb) = clipboard::open_clipboard() {
+                    *cb = new_cb;
+                }
+                continue;
+            }
         };
 
         let hash = match content.content_hash() {
@@ -463,6 +477,7 @@ fn run_sync(
     running: &Arc<AtomicBool>,
     interval: Duration,
     sync_mode: SyncMode,
+    cb: &mut Clipboard,
 ) -> anyhow::Result<()> {
     let mut last_clipboard_hash: Option<ContentHash> = None;
     let mut last_primary_hash: Option<ContentHash> = None;
@@ -473,7 +488,7 @@ fn run_sync(
         std::thread::sleep(interval);
         state.maybe_prune();
 
-        if let Some(result) = state.check_expiry_and_restore() {
+        if let Some(result) = state.check_expiry_and_restore(cb) {
             last_clipboard_hash = Some(result.clipboard_hash);
             if matches!(sync_mode, SyncMode::Both | SyncMode::ToPrimary) {
                 let new_handle = clipboard::write_selection_text(
@@ -490,9 +505,9 @@ fn run_sync(
 
         // Process CLIPBOARD first; its buffer is freed before PRIMARY read.
         let sync_to_primary = matches!(sync_mode, SyncMode::Both | SyncMode::ToPrimary);
-        let cb = state.poll_clipboard(&last_clipboard_hash, sync_to_primary);
-        last_clipboard_hash = cb.hash;
-        let synced_to_primary = if let Some(text) = cb.sync_text {
+        let cb_result = state.poll_clipboard(cb, &last_clipboard_hash, sync_to_primary);
+        last_clipboard_hash = cb_result.hash;
+        let synced_to_primary = if let Some(text) = cb_result.sync_text {
             let new_handle =
                 clipboard::write_selection_text(LinuxClipboardKind::Primary, &text);
             if let Some(old) = primary_handle.take() {
@@ -509,7 +524,7 @@ fn run_sync(
         // the same content we wrote, wasting an allocation.
         if !synced_to_primary {
             let sync_to_clipboard = matches!(sync_mode, SyncMode::Both | SyncMode::ToClipboard);
-            let pr = state.poll_primary(&last_primary_hash, sync_to_clipboard);
+            let pr = state.poll_primary(cb, &last_primary_hash, sync_to_clipboard);
             last_primary_hash = pr.hash;
             if let Some(text) = pr.sync_text {
                 let new_handle =
@@ -534,6 +549,7 @@ fn run_sync(
     running: &Arc<AtomicBool>,
     interval: Duration,
     _sync_mode: SyncMode,
+    cb: &mut Clipboard,
 ) -> anyhow::Result<()> {
-    run_disabled(state, running, interval)
+    run_disabled(state, running, interval, cb)
 }
