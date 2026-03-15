@@ -1,11 +1,9 @@
-use chrono::{NaiveDateTime, Utc};
+use chrono::Utc;
 
-use crate::models::entry::TIMESTAMP_FORMAT;
+use crate::models::entry::Timestamp;
 
-pub fn format_created_at(raw: &str) -> String {
-    let Ok(created) = NaiveDateTime::parse_from_str(raw, TIMESTAMP_FORMAT) else {
-        return raw.to_string();
-    };
+pub fn format_created_at(ts: &Timestamp) -> String {
+    let created = ts.to_naive();
     let now = Utc::now().naive_utc();
     let diff = now.signed_duration_since(created);
 
@@ -25,13 +23,14 @@ pub fn format_created_at(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::entry::TIMESTAMP_FORMAT;
+    use crate::models::entry::{Timestamp, TIMESTAMP_FORMAT};
     use chrono::Utc;
 
-    fn ts_ago(secs: i64) -> String {
-        (Utc::now().naive_utc() - chrono::Duration::seconds(secs))
+    fn ts_ago(secs: i64) -> Timestamp {
+        let s = (Utc::now().naive_utc() - chrono::Duration::seconds(secs))
             .format(TIMESTAMP_FORMAT)
-            .to_string()
+            .to_string();
+        Timestamp::from_raw(s)
     }
 
     #[test]
@@ -64,10 +63,5 @@ mod tests {
         let result = format_created_at(&ts_ago(86400 * 30));
         assert!(result.starts_with("20"), "expected date, got: {result}");
         assert_eq!(result.len(), 10); // "YYYY-MM-DD"
-    }
-
-    #[test]
-    fn test_invalid_input_passthrough() {
-        assert_eq!(format_created_at("garbage"), "garbage");
     }
 }

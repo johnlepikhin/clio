@@ -4,9 +4,16 @@ pub mod repository;
 use std::path::Path;
 
 use log::debug;
-use rusqlite::Connection;
+pub use rusqlite::Connection;
 
 use crate::errors::Result;
+
+/// SQLite busy timeout for CLI operations (ms).
+const BUSY_TIMEOUT_CLI_MS: u32 = 5000;
+/// SQLite busy timeout for UI operations (ms) — shorter to keep UI responsive.
+const BUSY_TIMEOUT_UI_MS: u32 = 1000;
+/// SQLite mmap size for UI: 64 MB for faster reads.
+const MMAP_SIZE_UI: u32 = 67_108_864;
 
 pub fn init_db(path: &Path) -> Result<Connection> {
     debug!("opening database at {}", path.display());
@@ -21,7 +28,7 @@ pub fn init_db(path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.pragma_update(None, "busy_timeout", 5000)?;
+    conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_CLI_MS)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrations::run_migrations(&mut conn)?;
     Ok(conn)
@@ -29,13 +36,12 @@ pub fn init_db(path: &Path) -> Result<Connection> {
 
 /// Open DB for UI use: skip migrations and foreign_keys, enable mmap.
 /// Assumes `init_db` has already been called (e.g. by `clio watch`).
-#[cfg(feature = "ui")]
 pub fn init_db_ui(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.pragma_update(None, "busy_timeout", 1000)?;
-    conn.pragma_update(None, "mmap_size", 67_108_864)?; // 64 MB
+    conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_UI_MS)?;
+    conn.pragma_update(None, "mmap_size", MMAP_SIZE_UI)?;
     Ok(conn)
 }
 

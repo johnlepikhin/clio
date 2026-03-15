@@ -1,22 +1,24 @@
+use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use chrono::Utc;
 use log::{debug, warn};
 
 use crate::config::CompiledRule;
-use crate::models::entry::{ClipboardEntry, EntryContent, TIMESTAMP_FORMAT};
+use crate::models::entry::{ClipboardEntry, Timestamp};
 
 /// Maximum bytes to read from command stdout (50 MB safety limit).
 const MAX_COMMAND_OUTPUT: u64 = 50 * 1024 * 1024;
+/// Maximum bytes to read from command stderr (1 MB).
+const MAX_COMMAND_STDERR: u64 = 1024 * 1024;
 
 /// Result of applying action rules to a clipboard entry.
 pub struct ActionResult {
     /// Transformed text content (None if unchanged or image entry).
     pub transformed_text: Option<String>,
     /// Per-entry expiration timestamp (ISO 8601).
-    pub expires_at: Option<String>,
+    pub expires_at: Option<Timestamp>,
     /// Original TTL duration from the matching rule (for expiry tracking).
     pub ttl: Option<Duration>,
     /// Mask text to display instead of real content in history UI.
@@ -27,14 +29,14 @@ pub struct ActionResult {
 /// Rules are applied in definition order. For TTL, last match wins.
 /// For commands, they chain sequentially.
 pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResult {
-    let text = entry.content.text();
-    let source_app = entry.source_app.as_deref();
-    let source_title = entry.source_title.as_deref();
-    let is_image = matches!(entry.content, EntryContent::Image(_));
+    let text = entry.content().text();
+    let source_app = entry.source_app();
+    let source_title = entry.source_title();
+    let is_image = entry.content().blob().is_some();
 
     let mut ttl: Option<Duration> = None;
     let mut mask_with: Option<String> = None;
-    let mut current_text: Option<String> = text.map(|t| t.to_owned());
+    let mut current_text: Option<Cow<'_, str>> = text.map(Cow::Borrowed);
 
     for rule in rules {
         if !rule_matches(rule, source_app, current_text.as_deref(), is_image, source_title) {
@@ -58,7 +60,7 @@ pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResu
             if let Some(ref input) = current_text {
                 debug!("running command for rule '{}': {:?}", rule.name, cmd);
                 match run_command(cmd, input, rule.command_timeout) {
-                    Ok(output) => current_text = Some(output),
+                    Ok(output) => current_text = Some(Cow::Owned(output)),
                     Err(e) => {
                         warn!(
                             "command failed for rule '{}': {e}; keeping original text",
@@ -70,24 +72,14 @@ pub fn apply_rules(rules: &[CompiledRule], entry: &ClipboardEntry) -> ActionResu
         }
     }
 
-    let transformed_text = match (text, &current_text) {
-        (Some(original), Some(transformed)) if original != transformed => {
-            Some(transformed.clone())
+    let transformed_text = match (text, current_text) {
+        (Some(original), Some(transformed)) if original != transformed.as_ref() => {
+            Some(transformed.into_owned())
         }
         _ => None,
     };
 
-    let expires_at = ttl.map(|d| {
-        let chrono_d = match chrono::Duration::from_std(d) {
-            Ok(d) => d,
-            Err(_) => {
-                warn!("TTL duration {d:?} too large, entry will not expire");
-                chrono::Duration::MAX
-            }
-        };
-        let expires = Utc::now() + chrono_d;
-        expires.format(TIMESTAMP_FORMAT).to_string()
-    });
+    let expires_at = ttl.map(Timestamp::after);
 
     ActionResult {
         transformed_text,
@@ -189,48 +181,43 @@ fn wait_with_timeout(
     child: &mut std::process::Child,
     timeout: Duration,
 ) -> Result<std::process::Output, String> {
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = child
-                    .stdout
-                    .take()
-                    .map(|s| {
-                        let mut buf = Vec::new();
-                        s.take(MAX_COMMAND_OUTPUT).read_to_end(&mut buf).ok();
-                        buf
-                    })
-                    .unwrap_or_default();
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|s| {
-                        let mut buf = Vec::new();
-                        s.take(1024 * 1024).read_to_end(&mut buf).ok();
-                        buf
-                    })
-                    .unwrap_or_default();
-                return Ok(std::process::Output {
-                    status,
-                    stdout,
-                    stderr,
-                });
-            }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    return Err(format!("command timed out after {}s", timeout.as_secs()));
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => return Err(format!("failed to wait for command: {e}")),
+    use wait_timeout::ChildExt;
+
+    match child.wait_timeout(timeout) {
+        Ok(Some(status)) => {
+            let stdout = child
+                .stdout
+                .take()
+                .map(|s| {
+                    let mut buf = Vec::new();
+                    s.take(MAX_COMMAND_OUTPUT).read_to_end(&mut buf).ok();
+                    buf
+                })
+                .unwrap_or_default();
+            let stderr = child
+                .stderr
+                .take()
+                .map(|s| {
+                    let mut buf = Vec::new();
+                    s.take(MAX_COMMAND_STDERR).read_to_end(&mut buf).ok();
+                    buf
+                })
+                .unwrap_or_default();
+            Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
         }
+        Ok(None) => Err(format!("command timed out after {}s", timeout.as_secs())),
+        Err(e) => Err(format!("failed to wait for command: {e}")),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use crate::config::{ActionRule, RuleActions, RuleConditions};
 
     fn compile_rule(rule: &ActionRule) -> CompiledRule {
@@ -489,8 +476,7 @@ mod tests {
         let result = apply_rules(&rules, &entry);
         // Both matched, last TTL (60s) wins
         let expires = result.expires_at.unwrap();
-        let parsed = chrono::NaiveDateTime::parse_from_str(&expires, TIMESTAMP_FORMAT)
-            .unwrap_or_else(|e| panic!("failed to parse '{expires}': {e}"));
+        let parsed = expires.to_naive();
         let diff = parsed - before.naive_utc();
         assert!(
             diff.num_seconds() >= 55 && diff.num_seconds() <= 65,
@@ -682,7 +668,7 @@ mod tests {
         });
 
         let mut entry = text_entry("password123", None);
-        entry.source_title = Some("KeePassXC – Passwords".into());
+        entry.set_source_title(Some("KeePassXC – Passwords".into()));
         let result = apply_rules(&[rule], &entry);
         assert!(result.expires_at.is_some());
         assert_eq!(result.ttl, Some(Duration::from_secs(30)));
@@ -706,7 +692,7 @@ mod tests {
         });
 
         let mut entry = text_entry("hello", None);
-        entry.source_title = Some("Mozilla Firefox".into());
+        entry.set_source_title(Some("Mozilla Firefox".into()));
         let result = apply_rules(&[rule], &entry);
         assert!(result.expires_at.is_none());
     }
@@ -729,7 +715,7 @@ mod tests {
         });
 
         let entry = text_entry("password", None);
-        assert!(entry.source_title.is_none());
+        assert!(entry.source_title().is_none());
         let result = apply_rules(&[rule], &entry);
         assert!(result.expires_at.is_none());
     }
@@ -836,7 +822,7 @@ mod tests {
 
         let rgba = vec![255u8; 4 * 2 * 2];
         let mut entry = ClipboardEntry::from_image(2, 2, rgba, None).unwrap();
-        entry.source_title = Some("GIMP – image.png".into());
+        entry.set_source_title(Some("GIMP – image.png".into()));
         let result = apply_rules(&[rule], &entry);
         assert!(result.expires_at.is_some());
         assert_eq!(result.ttl, Some(Duration::from_secs(60)));

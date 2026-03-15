@@ -8,6 +8,9 @@ pub enum AppError {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    #[error("data integrity error: {0}")]
+    DataIntegrity(String),
+
     #[error("config error: {0}")]
     Config(String),
 
@@ -19,6 +22,12 @@ pub enum AppError {
 
     #[error("image error: {0}")]
     Image(#[from] image::ImageError),
+}
+
+impl From<arboard::Error> for AppError {
+    fn from(e: arboard::Error) -> Self {
+        AppError::Clipboard(e.to_string())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;

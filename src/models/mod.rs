@@ -1,3 +1,3 @@
 pub mod entry;
 
-pub use entry::ClipboardEntry;
+pub use entry::{ClipboardEntry, Timestamp};
