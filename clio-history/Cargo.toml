@@ -1,6 +1,6 @@
 [package]
 name = "clio-history"
-version = "0.12.2"
+version = "1.0.0"
 edition = "2021"
 description = "GTK4 history viewer for clio clipboard manager"
 license = "MIT"

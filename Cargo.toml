@@ -3,7 +3,7 @@ members = [".", "clio-history"]
 
 [package]
 name = "clio"
-version = "0.12.2"
+version = "1.0.0"
 edition = "2021"
 description = "A clipboard manager with SQLite history"
 license = "MIT"
