@@ -325,7 +325,6 @@ dependencies = [
  "ctrlc",
  "directories",
  "env_logger",
- "gtk4",
  "humantime",
  "humantime-serde",
  "image",
@@ -335,10 +334,26 @@ dependencies = [
  "rusqlite",
  "rusqlite_migration",
  "serde",
- "serde_yaml",
+ "serde_yaml_ng",
  "tempfile",
  "thiserror 2.0.18",
+ "wait-timeout",
  "x11rb",
+]
+
+[[package]]
+name = "clio-history"
+version = "0.12.2"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "clio",
+ "env_logger",
+ "gtk4",
+ "humantime",
+ "image",
+ "log",
 ]
 
 [[package]]
@@ -1637,10 +1652,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
+name = "serde_yaml_ng"
+version = "0.9.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+checksum = "bd24347956e682cf958c95e82deb9914cad4010d3efc035d579f81f4c426038c"
 dependencies = [
  "indexmap",
  "itoa",

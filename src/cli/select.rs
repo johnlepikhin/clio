@@ -22,22 +22,15 @@ pub fn run(conn: &Connection, source: &SelectSource) -> anyhow::Result<()> {
         .context("failed to read entry")?
         .ok_or_else(|| anyhow::anyhow!("entry {id} not found"))?;
 
-    match &entry.content {
-        EntryContent::Text(text) => {
-            clipboard::write_clipboard_text_sync(text)?;
-            #[cfg(target_os = "linux")]
-            clipboard::write_selection_text(arboard::LinuxClipboardKind::Primary, text);
-            debug!("text copied to clipboard");
-        }
-        EntryContent::Image(png_bytes) => {
-            let img = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)
-                .context("failed to decode PNG")?
-                .to_rgba8();
-            let (w, h) = img.dimensions();
-            clipboard::write_clipboard_image_sync(w, h, img.into_raw())?;
-            debug!("image copied to clipboard");
-        }
+    clipboard::write_entry_to_clipboard(&entry.content)?;
+
+    // Also set PRIMARY selection for text so middle-click paste works.
+    #[cfg(target_os = "linux")]
+    if let EntryContent::Text(text) = &entry.content {
+        clipboard::write_selection_text(arboard::LinuxClipboardKind::Primary, text);
     }
+
+    debug!("entry copied to clipboard");
 
     Ok(())
 }

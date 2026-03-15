@@ -1,0 +1,17 @@
+[package]
+name = "clio-history"
+version = "0.12.2"
+edition = "2021"
+description = "GTK4 history viewer for clio clipboard manager"
+license = "MIT"
+
+[dependencies]
+clio = { path = ".." }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+env_logger = { version = "0.11", default-features = false }
+gtk4 = { version = "0.9", features = ["v4_12"] }
+humantime = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+log = "0.4"

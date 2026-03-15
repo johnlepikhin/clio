@@ -1,7 +1,4 @@
-use std::sync::LazyLock;
-
 use anyhow::Context;
-use regex::Regex;
 use rusqlite::Connection;
 
 use crate::db::repository;
@@ -9,8 +6,6 @@ use crate::models::entry::EntryContent;
 use crate::time_fmt::format_created_at;
 
 use super::ListFormat;
-
-static WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\r\n\t ]+").unwrap());
 
 /// 300 spaces to push the ID far beyond the visible area in dmenu/rofi/wofi.
 const SPACER: &str = concat!(
@@ -39,14 +34,13 @@ pub fn run(
         } else {
             match &entry.content {
                 EntryContent::Text(raw) => {
-                    let collapsed = WS_RE.replace_all(raw, " ");
-                    collapsed.trim().to_string()
+                    raw.split_whitespace().collect::<Vec<_>>().join(" ")
                 }
                 EntryContent::Image(_) => "[image]".to_string(),
             }
         };
 
-        let time_ago = format_created_at(entry.created_at.as_deref().unwrap_or(""));
+        let time_ago = entry.created_at.as_ref().map(format_created_at).unwrap_or_default();
         println!("{time_ago} {preview}{SPACER}{id}");
     }
 
@@ -55,17 +49,17 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    fn collapse_whitespace(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
 
     #[test]
     fn test_whitespace_collapse() {
-        let result = WS_RE.replace_all("hello\n\nworld\t foo", " ");
-        assert_eq!(result.trim(), "hello world foo");
+        assert_eq!(collapse_whitespace("hello\n\nworld\t foo"), "hello world foo");
     }
 
     #[test]
     fn test_whitespace_collapse_only_spaces() {
-        let result = WS_RE.replace_all("  a  b  ", " ");
-        assert_eq!(result.trim(), "a b");
+        assert_eq!(collapse_whitespace("  a  b  "), "a b");
     }
 }

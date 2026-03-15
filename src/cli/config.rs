@@ -42,18 +42,14 @@ fn cmd_init(config_path: &Path, force: bool) -> anyhow::Result<()> {
 }
 
 fn cmd_validate(config_path: &Path) -> anyhow::Result<()> {
-    let config = if config_path.exists() {
-        crate::config::load_config(Some(config_path)).context("failed to load config")?
+    // load_config already calls validate(), so a successful load implies valid config.
+    if config_path.exists() {
+        crate::config::load_config(Some(config_path)).context("failed to load config")?;
     } else {
         println!(
             "No config file found at {}. Using defaults.",
             config_path.display()
         );
-        crate::config::Config::default()
-    };
-
-    if let Err(errors) = config.validate() {
-        anyhow::bail!("invalid configuration:\n  {}", errors.join("\n  "));
     }
 
     println!("Configuration is valid.");

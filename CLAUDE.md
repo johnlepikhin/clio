@@ -18,13 +18,23 @@ Auto-generated from all feature plans. Last updated: 2026-02-21
 ## Project Structure
 
 ```text
+Cargo.toml          # workspace root, clio lib+bin (no GTK)
 src/
-tests/
+  lib.rs            # public modules for clio library
+  main.rs           # CLI binary entry point
+clio-history/       # separate crate: GTK4 history viewer
+  Cargo.toml
+  src/
+    main.rs
+    ui/             # GTK4 UI (moved from src/ui/)
 ```
 
 ## Commands
 
-cargo test [ONLY COMMANDS FOR ACTIVE TECHNOLOGIES][ONLY COMMANDS FOR ACTIVE TECHNOLOGIES] cargo clippy
+cargo test -p clio                                          # tests without GTK4
+guix shell -m manifest.scm -- cargo test -p clio-history    # UI tests (needs GTK4)
+cargo clippy -p clio
+guix shell -m manifest.scm -- cargo clippy -p clio-history
 
 ## Code Style
 

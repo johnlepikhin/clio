@@ -1,6 +1,5 @@
 pub mod config;
 pub mod copy;
-#[cfg(feature = "ui")]
 pub mod history;
 pub mod list;
 pub mod select;
@@ -11,6 +10,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+
+/// Command name for the internal clipboard server subprocess.
+/// Must match the `#[command(name = "_serve-clipboard")]` attribute on `Commands::ServeClipboard`.
+pub const SERVE_CLIPBOARD_CMD: &str = "_serve-clipboard";
 
 #[derive(Parser)]
 #[command(name = "clio", version, about = "Clipboard manager with history")]
@@ -38,8 +41,7 @@ pub enum Commands {
     },
     /// Watch clipboard for changes
     Watch,
-    /// Open history window
-    #[cfg(feature = "ui")]
+    /// Open history window (launches clio-history)
     History,
     /// Configuration management
     Config {

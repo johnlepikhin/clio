@@ -148,7 +148,7 @@ clio config init
 | Field | Default | Description |
 |-------|---------|-------------|
 | `max_history` | `500` | Maximum number of clipboard entries to retain |
-| `watch_interval_ms` | `500` | Clipboard polling interval in milliseconds |
+| `watch_interval` | `500ms` | Clipboard polling interval (e.g. `500ms`, `1s`) |
 | `db_path` | auto | Custom SQLite database path (default: `~/.local/share/clio/clio.db`) |
 | `max_entry_size_kb` | `51200` | Skip entries larger than this (in KB; default is 50 MB) |
 | `window_width` | `600` | History window width in pixels |

@@ -1,12 +1,15 @@
+[workspace]
+members = [".", "clio-history"]
+
 [package]
 name = "clio"
 version = "0.12.2"
 edition = "2021"
-description = "A clipboard manager with SQLite history and GTK4 UI"
+description = "A clipboard manager with SQLite history"
 license = "MIT"
 repository = "https://github.com/johnlepikhin/clio"
 readme = "README.md"
-keywords = ["clipboard", "history", "gtk4", "linux"]
+keywords = ["clipboard", "history", "linux"]
 categories = ["command-line-utilities"]
 exclude = ["specs/", ".specify/", "manifest.scm", "CLAUDE.md"]
 
@@ -19,7 +22,6 @@ clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 directories = "5"
 env_logger = { version = "0.11", default-features = false }
-gtk4 = { version = "0.9", features = ["v4_12"], optional = true }
 humantime = "2"
 libc = "0.2"
 log = "0.4"
@@ -29,13 +31,13 @@ regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rusqlite_migration = "1"
 serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
+serde_yaml = { package = "serde_yaml_ng", version = "0.9" }
 thiserror = "2"
+wait-timeout = "0.2"
 x11rb = { version = "0.13", optional = true, default-features = false }
 
 [features]
-default = ["ui", "x11-source-app"]
-ui = ["dep:gtk4"]
+default = ["x11-source-app"]
 x11-source-app = ["dep:x11rb"]
 
 [profile.release]

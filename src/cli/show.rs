@@ -14,7 +14,7 @@ pub fn run() -> anyhow::Result<()> {
             rgba_bytes,
         } => {
             let size_kb = rgba_bytes.len() / 1024;
-            println!("Image: {width}x{height} PNG ({size_kb} KB)");
+            println!("Image: {width}x{height} ({size_kb} KB RGBA)");
             Ok(())
         }
         ClipboardContent::Empty => {
