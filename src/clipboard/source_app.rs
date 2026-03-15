@@ -23,6 +23,10 @@ mod x11_cache {
     pub struct CachedConn {
         pub conn: RustConnection,
         pub root: u32,
+        pub active_window_atom: u32,
+        pub net_wm_name_atom: u32,
+        pub utf8_string_atom: u32,
+        pub clipboard_atom: u32,
     }
 
     thread_local! {
@@ -54,9 +58,14 @@ mod x11_cache {
 
     fn connect() -> Option<CachedConn> {
         use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::ConnectionExt;
         let (conn, screen_num) = x11rb::connect(None).ok()?;
         let root = conn.setup().roots[screen_num].root;
-        Some(CachedConn { conn, root })
+        let active_window_atom = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW").ok()?.reply().ok()?.atom;
+        let net_wm_name_atom = conn.intern_atom(false, b"_NET_WM_NAME").ok()?.reply().ok()?.atom;
+        let utf8_string_atom = conn.intern_atom(false, b"UTF8_STRING").ok()?.reply().ok()?.atom;
+        let clipboard_atom = conn.intern_atom(false, b"CLIPBOARD").ok()?.reply().ok()?.atom;
+        Some(CachedConn { conn, root, active_window_atom, net_wm_name_atom, utf8_string_atom, clipboard_atom })
     }
 }
 
@@ -68,15 +77,8 @@ fn active_window_info() -> Option<SourceInfo> {
     x11_cache::with_conn(|cached| {
         let conn = &cached.conn;
 
-        let active_atom = conn
-            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
-
         let reply = conn
-            .get_property(false, cached.root, active_atom, AtomEnum::ANY, 0, 1)
+            .get_property(false, cached.root, cached.active_window_atom, AtomEnum::ANY, 0, 1)
             .ok()?
             .reply()
             .ok()?;
@@ -86,7 +88,7 @@ fn active_window_info() -> Option<SourceInfo> {
             return None;
         }
 
-        let title = read_window_title(conn, window);
+        let title = read_window_title(conn, window, cached.net_wm_name_atom, cached.utf8_string_atom);
         let class = wm_class_with_traversal(conn, window);
 
         if class.is_some() || title.is_some() {
@@ -97,14 +99,18 @@ fn active_window_info() -> Option<SourceInfo> {
     })
 }
 
-/// Read WM_CLASS from `window`, walking up the parent chain (up to 10 levels).
+/// Maximum depth for WM_CLASS parent window traversal.
+#[cfg(all(target_os = "linux", feature = "x11-source-app"))]
+const MAX_WM_CLASS_DEPTH: usize = 10;
+
+/// Read WM_CLASS from `window`, walking up the parent chain (up to `MAX_WM_CLASS_DEPTH` levels).
 #[cfg(all(target_os = "linux", feature = "x11-source-app"))]
 fn wm_class_with_traversal(
     conn: &impl x11rb::protocol::xproto::ConnectionExt,
     window: u32,
 ) -> Option<String> {
     let mut current = window;
-    for _ in 0..10 {
+    for _ in 0..MAX_WM_CLASS_DEPTH {
         if let Some(class) = read_wm_class(conn, current) {
             return Some(class);
         }
@@ -140,21 +146,10 @@ fn read_wm_class(
 fn read_window_title(
     conn: &impl x11rb::protocol::xproto::ConnectionExt,
     window: u32,
+    net_wm_name_atom: u32,
+    utf8_string_atom: u32,
 ) -> Option<String> {
     // Try _NET_WM_NAME first (UTF-8)
-    let net_wm_name_atom = conn
-        .intern_atom(false, b"_NET_WM_NAME")
-        .ok()?
-        .reply()
-        .ok()?
-        .atom;
-    let utf8_string_atom = conn
-        .intern_atom(false, b"UTF8_STRING")
-        .ok()?
-        .reply()
-        .ok()?
-        .atom;
-
     let reply = conn
         .get_property(false, window, net_wm_name_atom, utf8_string_atom, 0, 1024)
         .ok()?
@@ -195,14 +190,8 @@ fn clipboard_owner_info() -> Option<SourceInfo> {
 
     x11_cache::with_conn(|cached| {
         let conn = &cached.conn;
-        let clipboard_atom = conn
-            .intern_atom(false, b"CLIPBOARD")
-            .ok()?
-            .reply()
-            .ok()?
-            .atom;
         let owner = conn
-            .get_selection_owner(clipboard_atom)
+            .get_selection_owner(cached.clipboard_atom)
             .ok()?
             .reply()
             .ok()?
@@ -211,7 +200,7 @@ fn clipboard_owner_info() -> Option<SourceInfo> {
             return None;
         }
         let class = read_wm_class(conn, owner);
-        let title = read_window_title(conn, owner);
+        let title = read_window_title(conn, owner, cached.net_wm_name_atom, cached.utf8_string_atom);
         if class.is_some() || title.is_some() {
             Some(SourceInfo { class, title })
         } else {

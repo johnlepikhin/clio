@@ -30,32 +30,45 @@ pub fn load_config(override_path: Option<&Path>) -> Result<Config> {
     let contents = std::fs::read_to_string(&path)?;
     let config: Config = serde_yaml::from_str(&contents)
         .map_err(|e| AppError::Config(format!("{}: {}", path.display(), e)))?;
+    config.validate().map_err(|errs| {
+        AppError::Config(format!("config validation failed:\n  {}", errs.join("\n  ")))
+    })?;
     Ok(config)
 }
 
-pub fn config_dir() -> PathBuf {
+/// Resolve a project directory from XDG, with fallback and auto-creation.
+fn resolve_dir(xdg_fn: fn(&ProjectDirs) -> &Path, fallback: &[&str]) -> PathBuf {
     let dir = ProjectDirs::from("", "", "clio")
-        .map(|dirs| dirs.config_dir().to_path_buf())
+        .map(|dirs| xdg_fn(&dirs).to_path_buf())
         .unwrap_or_else(|| {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".config").join("clio")
+            let mut path = PathBuf::from(home);
+            for segment in fallback {
+                path = path.join(segment);
+            }
+            path
         });
-    let _ = std::fs::create_dir_all(&dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("failed to create directory {}: {e}", dir.display());
+    }
     dir
 }
 
+pub fn config_dir() -> PathBuf {
+    resolve_dir(ProjectDirs::config_dir, &[".config", "clio"])
+}
+
+/// Resolve the database path: use config override if set, otherwise default location.
+pub fn resolve_db_path(config: &Config) -> PathBuf {
+    config
+        .db_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir().join("clio.db"))
+}
+
 pub fn data_dir() -> PathBuf {
-    let dir = ProjectDirs::from("", "", "clio")
-        .map(|dirs| dirs.data_dir().to_path_buf())
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("clio")
-        });
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+    resolve_dir(ProjectDirs::data_dir, &[".local", "share", "clio"])
 }
 
 #[cfg(test)]
@@ -66,7 +79,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.max_history, 500);
-        assert_eq!(config.watch_interval_ms, 500);
+        assert_eq!(config.watch_interval, std::time::Duration::from_millis(500));
         assert_eq!(config.max_entry_size_kb, 51200);
         assert_eq!(config.window_width, 600);
         assert_eq!(config.window_height, 400);
@@ -87,7 +100,7 @@ mod tests {
 
         let config = load_config(Some(&path)).unwrap();
         assert_eq!(config.max_history, 100);
-        assert_eq!(config.watch_interval_ms, 200);
+        assert_eq!(config.watch_interval, std::time::Duration::from_millis(200));
         // Unset fields use defaults
         assert_eq!(config.window_width, 600);
     }
@@ -109,7 +122,7 @@ mod tests {
         let yaml = "max_history: 250\n";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.max_history, 250);
-        assert_eq!(config.watch_interval_ms, 500); // default
+        assert_eq!(config.watch_interval, std::time::Duration::from_millis(500)); // default
     }
 
     #[test]
@@ -125,7 +138,7 @@ mod tests {
         let yaml = serde_yaml::to_string(&config).unwrap();
         let restored: Config = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(restored.max_history, config.max_history);
-        assert_eq!(restored.watch_interval_ms, config.watch_interval_ms);
+        assert_eq!(restored.watch_interval, config.watch_interval);
         assert_eq!(restored.max_entry_size_kb, config.max_entry_size_kb);
         assert_eq!(restored.window_width, config.window_width);
         assert_eq!(restored.window_height, config.window_height);
@@ -137,7 +150,7 @@ mod tests {
         let yaml = Config::default_yaml();
         let config: Config = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(config.max_history, 500);
-        assert_eq!(config.watch_interval_ms, 500);
+        assert_eq!(config.watch_interval, std::time::Duration::from_millis(500));
         assert_eq!(config.max_entry_size_kb, 51200);
         assert_eq!(config.window_width, 600);
         assert_eq!(config.window_height, 400);
@@ -439,5 +452,27 @@ actions:
         config.prune_interval = std::time::Duration::ZERO;
         let errors = config.validate().unwrap_err();
         assert!(errors.iter().any(|e| e.contains("prune_interval")));
+    }
+
+    #[test]
+    fn test_watch_interval_new_format() {
+        let yaml = "watch_interval: 250ms\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.watch_interval, std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn test_watch_interval_legacy_format() {
+        let yaml = "watch_interval_ms: 300\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.watch_interval, std::time::Duration::from_millis(300));
+    }
+
+    #[test]
+    fn test_validate_watch_interval_zero() {
+        let mut config = Config::default();
+        config.watch_interval = std::time::Duration::ZERO;
+        let errors = config.validate().unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("watch_interval")));
     }
 }

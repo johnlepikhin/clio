@@ -70,10 +70,57 @@ pub struct CompiledRule {
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
+const DEFAULT_WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
 const DEFAULT_PRUNE_INTERVAL: Duration = Duration::from_secs(3);
+
+fn default_watch_interval() -> Duration {
+    DEFAULT_WATCH_INTERVAL
+}
 
 fn default_prune_interval() -> Duration {
     DEFAULT_PRUNE_INTERVAL
+}
+
+/// Deserialize watch_interval: accepts both humantime strings ("500ms") and legacy u64 millis (500).
+fn deserialize_watch_interval<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct WatchIntervalVisitor;
+
+    impl<'de> de::Visitor<'de> for WatchIntervalVisitor {
+        type Value = Duration;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a duration string (e.g. \"500ms\") or integer milliseconds")
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Duration, E> {
+            Ok(Duration::from_millis(v))
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Duration, E> {
+            humantime::parse_duration(v).map_err(de::Error::custom)
+        }
+    }
+
+    deserializer.deserialize_any(WatchIntervalVisitor)
+}
+
+fn compile_regex(
+    rule_name: &str,
+    field_name: &str,
+    pattern: Option<&str>,
+) -> Result<Option<Regex>, String> {
+    match pattern {
+        Some(p) => Regex::new(p)
+            .map(Some)
+            .map_err(|e| format!("rule '{rule_name}': invalid {field_name} '{p}': {e}")),
+        None => Ok(None),
+    }
 }
 
 impl ActionRule {
@@ -89,28 +136,9 @@ impl ActionRule {
             ));
         }
 
-        let content_regex = match &self.conditions.content_regex {
-            Some(pattern) => match Regex::new(pattern) {
-                Ok(re) => Some(re),
-                Err(e) => {
-                    return Err(format!("rule '{}': invalid regex '{}': {}", self.name, pattern, e));
-                }
-            },
-            None => None,
-        };
-
-        let source_title_regex = match &self.conditions.source_title_regex {
-            Some(pattern) => match Regex::new(pattern) {
-                Ok(re) => Some(re),
-                Err(e) => {
-                    return Err(format!(
-                        "rule '{}': invalid source_title_regex '{}': {}",
-                        self.name, pattern, e
-                    ));
-                }
-            },
-            None => None,
-        };
+        let content_regex = compile_regex(&self.name, "regex", self.conditions.content_regex.as_deref())?;
+        let source_title_regex =
+            compile_regex(&self.name, "source_title_regex", self.conditions.source_title_regex.as_deref())?;
 
         if let Some(ref cmd) = self.actions.command {
             if cmd.is_empty() {
@@ -135,7 +163,13 @@ impl ActionRule {
 #[serde(default)]
 pub struct Config {
     pub max_history: usize,
-    pub watch_interval_ms: u64,
+    #[serde(
+        default = "default_watch_interval",
+        alias = "watch_interval_ms",
+        deserialize_with = "deserialize_watch_interval",
+        serialize_with = "humantime_serde::serialize"
+    )]
+    pub watch_interval: Duration,
     pub db_path: Option<String>,
     pub max_entry_size_kb: u64,
     pub window_width: i32,
@@ -156,7 +190,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             max_history: 500,
-            watch_interval_ms: 500,
+            watch_interval: DEFAULT_WATCH_INTERVAL,
             db_path: None,
             max_entry_size_kb: 51200,
             window_width: 600,
@@ -173,6 +207,12 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Max entry size in bytes (converts from KB config value).
+    #[must_use]
+    pub fn max_entry_size_bytes(&self) -> u64 {
+        self.max_entry_size_kb * 1024
+    }
+
     /// Generate a default configuration file with explanatory comments.
     #[must_use]
     pub fn default_yaml() -> String {
@@ -182,8 +222,8 @@ impl Config {
 # Maximum number of clipboard entries to keep in history.
 max_history: 500
 
-# Polling interval in milliseconds for `clio watch`.
-watch_interval_ms: 500
+# Polling interval for `clio watch` (e.g. 500ms, 1s).
+watch_interval: 500ms
 
 # Custom database path (omit to use XDG default).
 # db_path: /path/to/custom.db
@@ -285,8 +325,8 @@ prune_interval: 3s
         if self.max_history == 0 {
             errors.push("max_history must be greater than 0".to_owned());
         }
-        if self.watch_interval_ms == 0 {
-            errors.push("watch_interval_ms must be greater than 0".to_owned());
+        if self.watch_interval.is_zero() {
+            errors.push("watch_interval must be greater than 0".to_owned());
         }
         if self.max_entry_size_kb == 0 {
             errors.push("max_entry_size_kb must be greater than 0".to_owned());

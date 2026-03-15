@@ -1,14 +1,16 @@
+pub(crate) mod protocol;
 pub mod serve;
 pub mod source_app;
 
 use arboard::Clipboard;
+use image::ImageFormat;
 use log::error;
 
 #[cfg(target_os = "linux")]
 use arboard::{GetExtLinux, LinuxClipboardKind, SetExtLinux};
 
 use crate::errors::{AppError, Result};
-use crate::models::entry::{compute_hash, ContentHash};
+use crate::models::entry::{ContentHash, EntryContent};
 
 #[derive(Debug)]
 pub enum ClipboardContent {
@@ -22,8 +24,15 @@ pub enum ClipboardContent {
 }
 
 impl ClipboardContent {
-    /// Compute content hash, or None if empty.
+    /// Compute content hash for **change detection** in the watch loop.
+    ///
+    /// INVARIANT: For images, this hashes raw RGBA bytes (from arboard),
+    /// while `ClipboardEntry::from_image()` hashes the PNG-encoded bytes.
+    /// These hashes are NOT comparable across the two types. Change detection
+    /// (comparing successive `ClipboardContent` hashes) and DB dedup
+    /// (comparing `ClipboardEntry` hashes) operate in separate hash spaces.
     pub fn content_hash(&self) -> Option<ContentHash> {
+        use crate::models::entry::compute_hash;
         match self {
             Self::Text(t) => Some(compute_hash(t.as_bytes())),
             Self::Image { rgba_bytes, .. } => Some(compute_hash(rgba_bytes)),
@@ -33,7 +42,7 @@ impl ClipboardContent {
 }
 
 pub fn open_clipboard() -> Result<Clipboard> {
-    Clipboard::new().map_err(|e| AppError::Clipboard(e.to_string()))
+    Ok(Clipboard::new()?)
 }
 
 // ---------------------------------------------------------------------------
@@ -102,9 +111,10 @@ pub fn write_selection_text(
     kind: LinuxClipboardKind,
     text: &str,
 ) -> Option<std::thread::JoinHandle<()>> {
+    const CLIPBOARD_THREAD_STACK_SIZE: usize = 128 * 1024;
     let text = text.to_owned();
     std::thread::Builder::new()
-        .stack_size(128 * 1024)
+        .stack_size(CLIPBOARD_THREAD_STACK_SIZE)
         .spawn(move || {
             let mut cb = match Clipboard::new() {
                 Ok(cb) => cb,
@@ -128,8 +138,11 @@ pub fn write_selection_text(
 
 #[cfg(target_os = "linux")]
 fn spawn_clipboard_server(content: &ClipboardContent) -> Result<()> {
-    use std::io::Write;
     use std::process::{Command, Stdio};
+
+    if matches!(content, ClipboardContent::Empty) {
+        return Ok(());
+    }
 
     let exe = std::env::current_exe()
         .map_err(|e| AppError::Clipboard(format!("current_exe: {e}")))?;
@@ -147,30 +160,10 @@ fn spawn_clipboard_server(content: &ClipboardContent) -> Result<()> {
         .as_mut()
         .ok_or_else(|| AppError::Clipboard("no stdin".into()))?;
 
-    match content {
-        ClipboardContent::Text(text) => {
-            let bytes = text.as_bytes();
-            stdin.write_all(&[0x01])?;
-            stdin.write_all(&(bytes.len() as u32).to_be_bytes())?;
-            stdin.write_all(bytes)?;
-        }
-        ClipboardContent::Image {
-            width,
-            height,
-            rgba_bytes,
-        } => {
-            stdin.write_all(&[0x02])?;
-            stdin.write_all(&(rgba_bytes.len() as u32).to_be_bytes())?;
-            stdin.write_all(&width.to_be_bytes())?;
-            stdin.write_all(&height.to_be_bytes())?;
-            stdin.write_all(rgba_bytes)?;
-        }
-        ClipboardContent::Empty => {
-            return Ok(());
-        }
-    }
+    protocol::encode(content, stdin)?;
 
-    // Drop stdin so the child can finish reading, then detach.
+    // Register PID for targeted reaping, then detach.
+    crate::platform::register_child_pid(child.id());
     drop(child);
     Ok(())
 }
@@ -185,9 +178,32 @@ pub fn write_clipboard_text_sync(text: &str) -> Result<()> {
         let mut cb = open_clipboard()?;
         cb.set()
             .text(text.to_owned())
-            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+            ?;
         Ok(())
     }
+}
+
+/// Write an entry's content to the clipboard. Decodes PNG for images.
+pub fn write_entry_to_clipboard(content: &EntryContent) -> Result<()> {
+    match content {
+        EntryContent::Text(text) => write_clipboard_text_sync(text),
+        EntryContent::Image(png_bytes) => {
+            let img = image::load_from_memory_with_format(png_bytes, ImageFormat::Png)?
+                .to_rgba8();
+            let (w, h) = img.dimensions();
+            write_clipboard_image_sync(w, h, img.into_raw())
+        }
+    }
+}
+
+/// Restore the previous active clipboard entry, or clear clipboard if none exists.
+pub fn restore_or_clear_clipboard(conn: &rusqlite::Connection) -> Result<()> {
+    use crate::db::repository;
+    match repository::get_latest_active(conn)? {
+        Some(entry) => write_entry_to_clipboard(entry.content())?,
+        None => write_clipboard_text_sync("")?,
+    }
+    Ok(())
 }
 
 pub fn write_clipboard_image_sync(width: u32, height: u32, rgba_bytes: Vec<u8>) -> Result<()> {
@@ -209,7 +225,7 @@ pub fn write_clipboard_image_sync(width: u32, height: u32, rgba_bytes: Vec<u8>) 
         };
         cb.set()
             .image(img)
-            .map_err(|e| AppError::Clipboard(e.to_string()))?;
+            ?;
         Ok(())
     }
 }
